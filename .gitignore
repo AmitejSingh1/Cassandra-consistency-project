@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches
+.pytest_cache/
+.coverage
+htmlcov/
+.cache
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cassandra / Docker data & Volumes
+data/
+cassandra_data/
+volumes/
+docker-volumes/
+*.log
+
+# Temporary / Scratch files
+tmp/
+temp/
+scratch/
+
+# Secrets & Keys
+*.pem
+*.key
+credentials*
+*.p12
+

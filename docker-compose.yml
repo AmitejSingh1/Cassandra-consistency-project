@@ -1,0 +1,95 @@
+services:
+
+  cassandra1:
+    image: cassandra:4.1.12
+    container_name: cassandra1
+    hostname: cassandra1
+
+    cap_add:
+      - NET_ADMIN
+
+    environment:
+      CASSANDRA_CLUSTER_NAME: consistency-cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+
+      CASSANDRA_SEEDS: cassandra1
+
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+
+    ports:
+      - "9042:9042"
+
+    networks:
+      - cassandra-net
+    volumes:
+    - cassandra1_data:/var/lib/cassandra
+
+
+  cassandra2:
+    image: cassandra:4.1.12
+    container_name: cassandra2
+    hostname: cassandra2
+
+    cap_add:
+      - NET_ADMIN
+
+    environment:
+      CASSANDRA_CLUSTER_NAME: consistency-cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+
+      CASSANDRA_SEEDS: cassandra1
+
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+
+    ports:
+      - "9043:9042"
+
+    networks:
+      - cassandra-net
+    volumes:
+      - cassandra2_data:/var/lib/cassandra
+
+
+  cassandra3:
+    image: cassandra:4.1.12
+    container_name: cassandra3
+    hostname: cassandra3
+
+
+    cap_add:
+      - NET_ADMIN
+
+    environment:
+      CASSANDRA_CLUSTER_NAME: consistency-cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_RACK: rack1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+
+      CASSANDRA_SEEDS: cassandra1
+
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 100M
+
+    ports:
+      - "9044:9042"
+
+    networks:
+      - cassandra-net
+    volumes:
+      - cassandra3_data:/var/lib/cassandra
+
+
+networks:
+  cassandra-net:
+    driver: bridge
+
+volumes:
+  cassandra1_data:
+  cassandra2_data:
+  cassandra3_data:

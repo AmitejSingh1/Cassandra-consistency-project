@@ -1,0 +1,486 @@
+READ-YOUR-WRITES CONSISTENCY – NORMAL OPERATION EXPERIMENT
+
+
+OBJECTIVE
+---------
+
+The purpose of this experiment is to investigate whether Apache Cassandra
+provides read-your-writes (RYW) consistency under different combinations
+of read and write consistency levels.
+
+Read-your-writes consistency means that after a client successfully
+performs a write, a subsequent read by the same logical client should
+observe that write or a newer value.
+
+Example:
+
+    Initial value = v1
+
+    Client writes v2
+    Write completes successfully
+
+    Client reads value
+
+    Read returns v2 -> PASS
+    Read returns v1 -> RYW VIOLATION
+
+The read is issued only AFTER Cassandra reports that the write has
+successfully completed. If the read were issued while the write was still
+in progress, returning the old value would not necessarily constitute an
+RYW violation.
+
+
+DATABASE CONFIGURATION
+----------------------
+
+Apache Cassandra is deployed as three Docker containers:
+
+    cassandra1
+    cassandra2
+    cassandra3
+
+The containers form one Cassandra cluster.
+
+Replication factor:
+
+    RF = 3
+
+Therefore, each experimental partition has replicas on all three
+Cassandra nodes.
+
+The keyspace uses NetworkTopologyStrategy with:
+
+    datacenter1 : 3
+
+
+CASSANDRA CONSISTENCY LEVELS
+----------------------------
+
+Three consistency levels are investigated:
+
+    ONE
+    QUORUM
+    ALL
+
+With RF = 3:
+
+    ONE
+        requires sufficient response from 1 replica.
+
+    QUORUM
+        requires sufficient responses from 2 replicas.
+
+    ALL
+        requires responses from all 3 replicas.
+
+An important point is that WRITE ONE does NOT mean that Cassandra sends
+the mutation to only one replica.
+
+Cassandra attempts to send the mutation to the relevant replicas. The
+write consistency level determines how many acknowledgements are required
+before Cassandra reports the write as successful.
+
+
+READ/WRITE CONFIGURATIONS
+-------------------------
+
+Both write consistency level and read consistency level are varied.
+
+This gives nine configurations:
+
+    WRITE ONE     / READ ONE
+    WRITE ONE     / READ QUORUM
+    WRITE ONE     / READ ALL
+
+    WRITE QUORUM  / READ ONE
+    WRITE QUORUM  / READ QUORUM
+    WRITE QUORUM  / READ ALL
+
+    WRITE ALL     / READ ONE
+    WRITE ALL     / READ QUORUM
+    WRITE ALL     / READ ALL
+
+
+NETWORK CONDITIONS
+------------------
+
+All Cassandra nodes are Docker containers running on the same physical
+machine.
+
+Without intervention, communication over the Docker network is extremely
+fast compared with many real distributed deployments.
+
+This caused an earlier preliminary RYW experiment to observe 100% success
+for all configurations because replica propagation was often effectively
+complete before the immediate read occurred.
+
+Therefore, a controlled network condition was introduced using Linux
+netem:
+
+    tc qdisc replace dev eth0 root netem delay 25ms 25ms
+
+This configures:
+
+    25 ms nominal/base delay
+    25 ms jitter
+
+The purpose is not to deliberately force consistency violations.
+
+The purpose is to prevent the co-located Docker deployment from having
+unrealistically negligible network communication time and to introduce
+variable network timing.
+
+The exact same baseline network condition is intended to be maintained
+for:
+
+    normal operation
+    node failure
+    network partition
+
+Therefore, network latency is not changed according to the desired
+experimental result.
+
+
+COORDINATOR SELECTION
+---------------------
+
+Each Cassandra container is exposed separately:
+
+    cassandra1 -> localhost:9042
+    cassandra2 -> localhost:9043
+    cassandra3 -> localhost:9044
+
+A Cassandra node receiving a client request acts as the coordinator for
+that request.
+
+The coordinator is NOT necessarily the replica that exclusively stores
+the data. It coordinates communication with the appropriate replicas.
+
+For every experimental write, one of the three Cassandra nodes is chosen
+independently at random as the write coordinator.
+
+For the subsequent read, a node is again chosen independently at random
+as the read coordinator.
+
+Therefore:
+
+    write coordinator != read coordinator
+
+is possible and common.
+
+The experiment records both coordinators.
+
+Because each coordinator is selected independently from three nodes, the
+write and read coordinators are expected to differ approximately 2/3 of
+the time.
+
+The observed experiment produced approximately 127–144 different-
+coordinator trials out of 200 depending on the configuration, which is
+consistent with this random-selection design.
+
+
+EXPERIMENTAL PROCEDURE
+----------------------
+
+For every consistency-level configuration:
+
+    200 independent trials
+
+are performed.
+
+Therefore:
+
+    9 configurations x 200 trials
+    = 1,800 total trials.
+
+
+STEP 1 – ESTABLISH INITIAL VALUE
+
+Every trial uses a unique key.
+
+The initial value is:
+
+    version = 1
+
+The initial write uses consistency level ALL.
+
+This ensures all three replicas acknowledge the baseline value before the
+actual RYW experiment begins.
+
+Conceptually:
+
+    Node 1 = v1
+    Node 2 = v1
+    Node 3 = v1
+
+
+STEP 2 – PERFORM EXPERIMENTAL WRITE
+
+A random write coordinator is selected.
+
+The client writes:
+
+    version = 2
+
+using the write consistency level being tested.
+
+For example:
+
+    WRITE CL = ONE
+
+The program waits until Cassandra reports that the write completed
+successfully.
+
+
+STEP 3 – IMMEDIATE READ
+
+Immediately after the successful write returns, a read coordinator is
+selected independently at random.
+
+No artificial sleep is inserted between the successful write and the
+read.
+
+The client reads the same key using the read consistency level being
+tested.
+
+
+STEP 4 – CLASSIFY RESULT
+
+If:
+
+    observed version = 2
+
+then:
+
+    PASS
+
+because the client observed its successful write.
+
+
+If:
+
+    observed version = 1
+
+then:
+
+    RYW VIOLATION
+
+because the same logical client successfully wrote version 2 but
+subsequently observed the older version 1.
+
+
+If the write or read cannot complete:
+
+    ERROR
+
+Errors are kept separate from consistency violations because an
+unavailable operation is not equivalent to an operation returning stale
+data.
+
+
+RYW NORMAL-OPERATION RESULTS
+----------------------------
+
+The observed results were:
+
+    WRITE ONE / READ ONE
+
+        Passes:      170 / 200
+        Violations:   30 / 200
+        RYW success:  0.850
+
+
+    WRITE ONE / READ QUORUM
+
+        Passes:      196 / 200
+        Violations:    4 / 200
+        RYW success:  0.980
+
+
+    WRITE ONE / READ ALL
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+    WRITE QUORUM / READ ONE
+
+        Passes:      198 / 200
+        Violations:    2 / 200
+        RYW success:  0.990
+
+
+    WRITE QUORUM / READ QUORUM
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+    WRITE QUORUM / READ ALL
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+    WRITE ALL / READ ONE
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+    WRITE ALL / READ QUORUM
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+    WRITE ALL / READ ALL
+
+        Passes:      200 / 200
+        Violations:    0
+        RYW success:  1.000
+
+
+INTERPRETATION OF RYW RESULTS
+-----------------------------
+
+For RF = 3, an important replica-intersection relationship is:
+
+    W + R > RF
+
+where:
+
+    W = number of replica acknowledgements required for the write
+    R = number of replica responses required for the read
+    RF = replication factor
+
+
+The three configurations that do NOT satisfy W + R > RF are:
+
+    ONE / ONE
+
+        1 + 1 = 2 <= 3
+
+
+    ONE / QUORUM
+
+        1 + 2 = 3 <= 3
+
+
+    QUORUM / ONE
+
+        2 + 1 = 3 <= 3
+
+
+These were exactly the three configurations in which RYW violations were
+observed experimentally:
+
+    ONE / ONE       -> 30 violations
+    ONE / QUORUM    -> 4 violations
+    QUORUM / ONE    -> 2 violations
+
+
+All configurations satisfying:
+
+    W + R > 3
+
+showed zero observed RYW violations across the 200 trials.
+
+Examples:
+
+    ONE + ALL = 4
+
+    QUORUM + QUORUM = 4
+
+    ALL + ONE = 4
+
+
+WHY READ ALL CAN RETURN THE LATEST VALUE
+----------------------------------------
+
+Suppose WRITE ONE has completed and replicas temporarily contain:
+
+    Node 1 = v2
+    Node 2 = v1
+    Node 3 = v1
+
+A READ ALL obtains responses involving all replicas.
+
+It therefore encounters both the newer and older versions.
+
+Cassandra does not simply use majority voting such as:
+
+    v1, v1, v2
+    -> choose v1
+
+Instead, Cassandra reconciles conflicting values using mutation
+timestamps.
+
+Therefore, the newer mutation v2 can be selected even though two replicas
+temporarily contain v1.
+
+This helps explain why:
+
+    WRITE ONE / READ ALL
+
+produced 200/200 successful RYW observations.
+
+
+PRIMARY METRIC
+--------------
+
+RYW success rate is calculated as:
+
+    successful RYW trials
+    ---------------------
+    completed trials
+
+Errors/unavailable operations are tracked separately.
+
+
+RESULT FILES
+------------
+
+The experiment produces:
+
+    read_your_writes/results/normal.csv
+
+containing all 1,800 individual trials.
+
+It also produces:
+
+    read_your_writes/results/normal_summary.csv
+
+containing the aggregated results for the nine read/write consistency
+configurations.
+
+
+IMPORTANT INTERPRETATION
+------------------------
+
+The empirical success rate describes what was observed in this particular
+experimental environment.
+
+For example:
+
+    ONE / ONE = 0.85
+
+does NOT mean Cassandra provides an inherent 85% probability of
+read-your-writes consistency.
+
+The value depends on the deployment, network timing, coordinator
+selection, workload and other experimental conditions.
+
+Similarly, observing:
+
+    200 / 200 PASS
+
+means that no violation was observed during those trials.
+
+Experimental observation should be distinguished from a theoretical
+consistency guarantee.

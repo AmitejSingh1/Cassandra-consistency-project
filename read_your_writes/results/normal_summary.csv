@@ -1,0 +1,10 @@
+write_cl,read_cl,trials,passes,violations,errors,availability,ryw_success_rate,different_coordinator_trials
+ONE,ONE,200,170,30,0,1.0,0.85,136
+ONE,QUORUM,200,196,4,0,1.0,0.98,131
+ONE,ALL,200,200,0,0,1.0,1.0,133
+QUORUM,ONE,200,198,2,0,1.0,0.99,137
+QUORUM,QUORUM,200,200,0,0,1.0,1.0,131
+QUORUM,ALL,200,200,0,0,1.0,1.0,142
+ALL,ONE,200,200,0,0,1.0,1.0,144
+ALL,QUORUM,200,200,0,0,1.0,1.0,127
+ALL,ALL,200,200,0,0,1.0,1.0,132

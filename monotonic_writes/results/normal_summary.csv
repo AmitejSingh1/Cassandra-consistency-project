@@ -1,0 +1,4 @@
+write_cl,requested_trials,measured_trials,passes,violations,errors,setup_errors,availability,mw_success_rate,completed_diagnostic_probes,stale_diagnostic_probes,stale_probe_rate
+ONE,200,200,200,0,0,0,1.0,1.0,3000,225,0.075
+QUORUM,200,200,200,0,0,0,1.0,1.0,3000,3,0.001
+ALL,200,200,198,0,2,0,0.99,1.0,2976,0,0.0

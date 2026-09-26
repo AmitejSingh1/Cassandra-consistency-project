@@ -1,0 +1,808 @@
+MONOTONIC READS (MR) – NORMAL OPERATION
+FINAL EXPERIMENT DESIGN
+
+
+1. OBJECTIVE
+------------
+
+The purpose of this experiment is to investigate whether Apache Cassandra
+provides monotonic-read consistency under different combinations of read
+and write consistency levels.
+
+Monotonic-read consistency means:
+
+Once a client has observed a particular version of a value, a later read
+by the same client should never return an older version.
+
+Example:
+
+    Read sequence:
+
+    v1 -> v1 -> v2 -> v2 -> v2
+
+    Result: PASS
+
+The client moves from an older version to a newer version and never moves
+backwards.
+
+
+Example:
+
+    v1 -> v2 -> v1 -> v2 -> v2
+               ^
+               |
+          MR VIOLATION
+
+The client observed v2 and subsequently observed the older v1.
+
+
+IMPORTANT:
+
+A stale read is NOT automatically a monotonic-read violation.
+
+For example:
+
+    v1 -> v1 -> v1 -> v1 -> v1
+
+may be stale if v2 has already been written, but it still satisfies
+monotonic reads because the client's observations never move backwards.
+
+
+
+2. DATABASE CONFIGURATION
+-------------------------
+
+The experiment uses three Apache Cassandra Docker containers:
+
+    cassandra1
+    cassandra2
+    cassandra3
+
+All nodes belong to:
+
+    datacenter1
+
+Replication factor:
+
+    RF = 3
+
+Therefore, each experimental partition is replicated across all three
+Cassandra nodes.
+
+The consistency levels investigated are:
+
+    ONE
+    QUORUM
+    ALL
+
+
+Both the WRITE consistency level and READ consistency level are varied.
+
+Therefore, nine configurations are tested:
+
+    WRITE ONE     / READ ONE
+    WRITE ONE     / READ QUORUM
+    WRITE ONE     / READ ALL
+
+    WRITE QUORUM  / READ ONE
+    WRITE QUORUM  / READ QUORUM
+    WRITE QUORUM  / READ ALL
+
+    WRITE ALL     / READ ONE
+    WRITE ALL     / READ QUORUM
+    WRITE ALL     / READ ALL
+
+
+
+3. NETWORK CONDITION
+--------------------
+
+All Cassandra nodes run as Docker containers on the same physical
+computer.
+
+Without network emulation, communication between the containers is
+extremely fast compared with many real distributed deployments.
+
+The following Linux netem configuration is therefore applied:
+
+    tc qdisc replace dev eth0 root netem delay 25ms 25ms
+
+This introduces:
+
+    25 ms nominal/base delay
+    25 ms jitter
+
+The purpose is to introduce variable network timing and avoid the
+near-zero communication delay of co-located Docker containers.
+
+All three Cassandra nodes remain connected and operational during the
+normal-operation experiment.
+
+The same baseline network configuration is retained across the
+client-centric consistency experiments.
+
+
+
+4. COORDINATOR SELECTION
+------------------------
+
+The Cassandra nodes are exposed separately:
+
+    cassandra1 -> localhost:9042
+    cassandra2 -> localhost:9043
+    cassandra3 -> localhost:9044
+
+The experiment maintains a client session associated with each exposed
+node.
+
+For the experimental write, one node is selected at random to act as the
+coordinator.
+
+For each subsequent read, a coordinator is independently selected again.
+
+Therefore, the five reads in one trial may use different coordinators.
+
+Example:
+
+    WRITE v2 -> cassandra1
+
+    READ 1 -> cassandra3
+    READ 2 -> cassandra1
+    READ 3 -> cassandra2
+    READ 4 -> cassandra3
+    READ 5 -> cassandra1
+
+This creates opportunities for the same logical client to observe
+different parts of the distributed system.
+
+
+
+5. NUMBER OF TRIALS
+-------------------
+
+Each of the nine WRITE/READ consistency configurations is tested using:
+
+    200 requested trials
+
+Therefore:
+
+    9 x 200
+    = 1,800 requested trials
+
+Each measured trial contains:
+
+    1 experimental write
+    5 consecutive reads
+
+Therefore, a fully completed experiment can contain up to:
+
+    1,800 x 5
+    = 9,000 read observations.
+
+
+
+6. EXPERIMENTAL PREPARATION
+---------------------------
+
+Every trial uses a unique key.
+
+Before the measured experiment begins, version 1 is established using:
+
+    WRITE CL = ALL
+
+Conceptually:
+
+    Node 1 = v1
+    Node 2 = v1
+    Node 3 = v1
+
+Using ALL provides a known initial state acknowledged by all three
+replicas.
+
+
+Because this operation is only experimental preparation, it may be
+retried up to three times if a timeout occurs.
+
+A failure during preparation is recorded as:
+
+    SETUP_ERROR
+
+and is NOT considered a monotonic-read violation.
+
+This distinction prevents failure to establish the experimental starting
+condition from being confused with the behavior being measured.
+
+
+
+7. MEASURED EXPERIMENT
+----------------------
+
+Once v1 has been successfully established, the measured trial begins.
+
+
+STEP 1 – WRITE
+
+The logical client writes:
+
+    version = 2
+
+using the WRITE consistency level being tested.
+
+A coordinator is selected independently at random.
+
+The program waits until Cassandra reports that the write has completed
+successfully.
+
+There is no retry for the experimental write.
+
+If the write cannot complete, the trial is recorded as:
+
+    ERROR
+
+
+STEP 2 – FIVE IMMEDIATE READS
+
+Immediately after the successful write, the same logical client performs:
+
+    READ 1
+    READ 2
+    READ 3
+    READ 4
+    READ 5
+
+using the READ consistency level being tested.
+
+There is no artificial sleep between these reads.
+
+A coordinator is independently selected for every read.
+
+The resulting client history might therefore look like:
+
+    [1, 1, 2, 2, 2]
+
+or:
+
+    [2, 2, 1, 2, 2]
+
+
+
+8. DETECTING A MONOTONIC-READ VIOLATION
+---------------------------------------
+
+Every observed version is compared with the previous version observed by
+the same logical client.
+
+If:
+
+    current version >= previous version
+
+there is no regression.
+
+
+Examples:
+
+    1 -> 1     valid
+    1 -> 2     valid
+    2 -> 2     valid
+
+
+If:
+
+    current version < previous version
+
+a monotonic-read violation has occurred.
+
+
+Example:
+
+    previous observation = v2
+    current observation  = v1
+
+Therefore:
+
+    v2 -> v1
+
+is an MR violation.
+
+
+
+9. EXAMPLE TRIALS
+-----------------
+
+Example A:
+
+    [1, 1, 1, 2, 2]
+
+Result:
+
+    PASS
+
+Although the early reads are stale relative to the successful v2 write,
+the client's observations never move backwards.
+
+
+Example B:
+
+    [2, 2, 2, 2, 2]
+
+Result:
+
+    PASS
+
+
+Example C:
+
+    [1, 2, 1, 2, 2]
+
+Result:
+
+    FAIL
+
+The transition:
+
+    2 -> 1
+
+is a monotonic-read violation.
+
+
+Example D:
+
+    [2, 1, 1, 2, 2]
+
+Result:
+
+    FAIL
+
+The first transition already moves backwards.
+
+
+
+10. TRIAL CLASSIFICATION
+------------------------
+
+PASS:
+
+    All five reads complete and no backwards transition occurs.
+
+
+FAIL:
+
+    All required operations complete, but at least one backwards
+    transition is observed.
+
+
+ERROR:
+
+    The measured experimental write or one of the five reads cannot
+    complete.
+
+
+SETUP_ERROR:
+
+    The initial v1 state could not be established after the permitted
+    setup retries.
+
+SETUP_ERROR is kept separate because the actual experiment never began.
+
+
+
+11. PREDICTIONS BEFORE RUNNING THE EXPERIMENT
+---------------------------------------------
+
+Before examining the final results, the following qualitative predictions
+were made.
+
+
+WRITE ONE / READ ONE
+
+    Monotonic-read violations are possible.
+
+    After WRITE ONE succeeds, some replicas may still contain v1 while
+    another contains v2.
+
+    Repeated READ ONE operations can therefore potentially observe:
+
+        v1 -> v2 -> v1
+
+    which violates monotonic reads.
+
+
+WRITE ONE / READ QUORUM
+
+    Violations may be possible, but are expected to be less likely than
+    ONE/ONE.
+
+    No particular non-100% success rate is assumed in advance.
+
+
+WRITE ONE / READ ALL
+
+    No violations expected.
+
+
+WRITE QUORUM / READ ONE
+
+    Violations are possible.
+
+    A successful QUORUM write requires two replica acknowledgements, but
+    a remaining replica may temporarily contain the older value.
+
+    READ ONE may therefore potentially observe a newer replica followed
+    by the stale replica.
+
+
+WRITE QUORUM / READ QUORUM
+
+    No violations expected.
+
+
+WRITE QUORUM / READ ALL
+
+    No violations expected.
+
+
+WRITE ALL / READ ONE
+
+    No violations expected.
+
+
+WRITE ALL / READ QUORUM
+
+    No violations expected.
+
+
+WRITE ALL / READ ALL
+
+    No violations expected.
+
+
+These predictions describe possible/expected behavior and are kept
+separate from the empirical observations.
+
+
+
+12. FINAL NORMAL-OPERATION RESULTS
+----------------------------------
+
+WRITE ONE / READ ONE
+
+    Requested trials:      200
+    Measured trials:       200
+    Passes:                197
+    Violating trials:        3
+    Experimental errors:     0
+    Setup errors:            0
+
+    Availability:          1.0000
+    MR success rate:       0.9850
+
+    Read observations:     1000
+    Regressions:              3
+    Regression rate:       0.0030
+
+
+WRITE ONE / READ QUORUM
+
+    Requested trials:      200
+    Measured trials:       197
+    Passes:                196
+    Violating trials:        0
+    Experimental errors:     1
+    Setup errors:            3
+
+    Availability:          0.9949
+    MR success rate:       1.0000
+
+    Read observations:      980
+    Regressions:              0
+    Regression rate:       0.0000
+
+
+WRITE ONE / READ ALL
+
+    Requested trials:      200
+    Measured trials:       200
+    Passes:                200
+    Violating trials:        0
+    Experimental errors:     0
+    Setup errors:            0
+
+    Availability:          1.0000
+    MR success rate:       1.0000
+
+    Read observations:     1000
+    Regressions:              0
+
+
+WRITE QUORUM / READ ONE
+
+    Requested trials:      200
+    Measured trials:       200
+    Passes:                195
+    Violating trials:        3
+    Experimental errors:     2
+    Setup errors:            0
+
+    Availability:          0.9900
+    MR success rate:       0.9848
+
+    Read observations:      990
+    Regressions:              3
+    Regression rate:       0.0030
+
+
+WRITE QUORUM / READ QUORUM
+
+    200 passes
+    0 violations
+    0 errors
+
+    MR success rate:       1.0000
+
+
+WRITE QUORUM / READ ALL
+
+    200 passes
+    0 violations
+    0 errors
+
+    MR success rate:       1.0000
+
+
+WRITE ALL / READ ONE
+
+    200 passes
+    0 violations
+    0 errors
+
+    MR success rate:       1.0000
+
+
+WRITE ALL / READ QUORUM
+
+    200 passes
+    0 violations
+    0 errors
+
+    MR success rate:       1.0000
+
+
+WRITE ALL / READ ALL
+
+    200 passes
+    0 violations
+    0 errors
+
+    MR success rate:       1.0000
+
+
+
+13. MAIN OBSERVATIONS
+---------------------
+
+Actual monotonic-read regressions were observed for:
+
+    WRITE ONE / READ ONE
+
+and:
+
+    WRITE QUORUM / READ ONE
+
+
+For ONE/ONE:
+
+    3 of 200 trials contained a regression.
+
+For QUORUM/ONE:
+
+    3 successfully measured histories contained a regression.
+
+
+No regressions were observed for:
+
+    ONE / QUORUM
+    ONE / ALL
+
+    QUORUM / QUORUM
+    QUORUM / ALL
+
+    ALL / ONE
+    ALL / QUORUM
+    ALL / ALL
+
+
+Importantly, the absence of observed violations does not by itself prove
+that every such configuration universally guarantees monotonic reads.
+
+
+
+14. WHY RYW AND MR RESULTS DIFFER
+---------------------------------
+
+The RYW experiment produced substantially more violations in weak
+configurations than the MR experiment.
+
+This is not contradictory because the two properties test different
+conditions.
+
+
+RYW asks:
+
+    "I successfully wrote v2. Does my next read observe v2?"
+
+Therefore:
+
+    write v2
+    read v1
+
+is immediately an RYW violation.
+
+
+MR asks:
+
+    "Given what I have already observed, do my subsequent observations
+    ever move backwards?"
+
+Therefore:
+
+    v1 -> v1 -> v1 -> v2 -> v2
+
+satisfies monotonic reads even though several reads returned the old
+version after v2 had already been written.
+
+
+A stale read therefore violates RYW much more easily than it violates MR.
+
+For MR, the client must first observe the newer value and subsequently
+observe an older value.
+
+
+
+15. AVAILABILITY AND CONSISTENCY ARE RECORDED SEPARATELY
+--------------------------------------------------------
+
+Timeouts are not classified as monotonic-read violations.
+
+For example, a Cassandra ReadTimeout means that Cassandra did not obtain
+enough replica responses before the timeout.
+
+It does NOT mean Cassandra returned an older version.
+
+Therefore, the experiment separately reports:
+
+    consistency success
+    consistency violations
+    experimental errors
+    setup errors
+    availability
+
+
+This distinction becomes particularly important in the later node-failure
+and network-partition scenarios.
+
+
+
+16. OUTPUT FILES
+----------------
+
+The final experiment generates:
+
+
+normal.csv
+
+    One row per completed read observation.
+
+    Contains information such as:
+
+        trial
+        read number
+        write consistency level
+        read consistency level
+        write coordinator
+        read coordinator
+        previous observed version
+        current observed version
+        regression flag
+
+
+normal_trials.csv
+
+    One row per requested trial.
+
+    Contains:
+
+        setup attempts
+        whether the experimental write completed
+        number of completed reads
+        number of regressions
+        complete observed sequence
+        PASS / FAIL / ERROR / SETUP_ERROR
+
+
+normal_summary.csv
+
+    One row for each of the nine consistency configurations.
+
+    Contains:
+
+        requested trials
+        measured trials
+        passes
+        violations
+        experimental errors
+        setup errors
+        availability
+        MR success rate
+        total reads
+        total regressions
+        regression rate
+
+
+
+17. PRIMARY METRIC
+------------------
+
+The primary consistency metric is:
+
+                         MR passes
+    MR success rate = -------------------
+                      completed MR trials
+
+
+Only completed histories are used to calculate the consistency success
+rate.
+
+Availability is reported separately.
+
+
+
+18. SECONDARY METRIC
+--------------------
+
+The experiment also reports:
+
+                               regression events
+    read regression rate = ---------------------------
+                           completed read observations
+
+
+This gives two perspectives:
+
+    MR success rate
+        -> How often did an entire client history satisfy MR?
+
+    Regression rate
+        -> How frequently did an individual backwards transition occur?
+
+
+
+19. LIMITATION
+--------------
+
+The measured success rates are empirical results for this particular
+deployment and experimental workload.
+
+For example:
+
+    ONE / ONE MR success = 0.985
+
+does NOT mean Cassandra inherently provides monotonic reads with a 98.5%
+probability.
+
+The observed rate depends on factors including:
+
+    network timing
+    coordinator selection
+    Docker scheduling
+    Cassandra replica propagation
+    workload
+    number of reads per trial
+    number of trials
+
+Similarly:
+
+    200/200 successful trials
+
+means that no violation was observed in those trials. Experimental
+observation should not automatically be interpreted as a universal
+theoretical guarantee.

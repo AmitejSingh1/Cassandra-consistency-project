@@ -1,0 +1,676 @@
+MONOTONIC WRITES (MW) – NORMAL OPERATION
+FINAL EXPERIMENT DESIGN AND RESULTS
+
+
+1. OBJECTIVE
+------------
+
+The purpose of this experiment is to investigate whether Apache Cassandra
+preserves monotonic-write consistency for sequential writes issued by the
+same logical client.
+
+Monotonic-write consistency requires writes issued by one client to be
+applied in the order in which that client issued them.
+
+For example:
+
+    WRITE v2
+    WRITE v3
+    WRITE v4
+    WRITE v5
+    WRITE v6
+
+The later writes should not ultimately be superseded by an earlier write.
+
+A problematic ordering would conceptually be:
+
+    client order:
+        v2 -> v3
+
+    resolved database order:
+        v3 -> v2
+
+because the client's earlier write has effectively taken precedence over
+its later write.
+
+
+2. WHY ONLY WRITE CONSISTENCY LEVEL IS VARIED
+---------------------------------------------
+
+Unlike Read-Your-Writes and Monotonic Reads, Monotonic Writes is primarily
+a property concerning the ordering of writes from the same client.
+
+Therefore, the experimental configurations are:
+
+    WRITE ONE
+    WRITE QUORUM
+    WRITE ALL
+
+Read consistency level is not treated as an independent MW configuration.
+
+Reads are used only as diagnostic and measurement mechanisms.
+
+
+3. DATABASE CONFIGURATION
+-------------------------
+
+Three Apache Cassandra nodes are deployed as Docker containers:
+
+    cassandra1
+    cassandra2
+    cassandra3
+
+Replication factor:
+
+    RF = 3
+
+Each experimental partition therefore has replicas across all three
+Cassandra nodes.
+
+
+4. NETWORK CONDITION
+--------------------
+
+The same baseline network condition used in the other normal-operation
+experiments is retained:
+
+    tc qdisc replace dev eth0 root netem delay 25ms 25ms
+
+This introduces:
+
+    25 ms nominal/base network delay
+    25 ms jitter
+
+All three Cassandra nodes remain operational and connected.
+
+The network condition is not changed according to the consistency level
+or desired experimental outcome.
+
+
+5. COORDINATOR SELECTION
+------------------------
+
+The Cassandra containers are exposed as:
+
+    cassandra1 -> localhost:9042
+    cassandra2 -> localhost:9043
+    cassandra3 -> localhost:9044
+
+For every sequential write, one of the three nodes is independently
+selected at random as the coordinator.
+
+Therefore, the same logical client's write sequence might be:
+
+    WRITE v2 -> cassandra1
+    WRITE v3 -> cassandra3
+    WRITE v4 -> cassandra2
+    WRITE v5 -> cassandra1
+    WRITE v6 -> cassandra3
+
+This allows sequential client writes to enter the distributed system
+through different coordinators.
+
+
+6. NUMBER OF TRIALS
+-------------------
+
+Each write consistency level is tested using:
+
+    200 trials
+
+There are three write consistency levels:
+
+    ONE
+    QUORUM
+    ALL
+
+Therefore:
+
+    3 x 200
+    = 600 requested trials
+
+Each trial contains:
+
+    5 sequential experimental writes
+
+giving up to:
+
+    600 x 5
+    = 3,000 experimental writes.
+
+
+7. INITIAL STATE
+----------------
+
+Every trial uses a unique key.
+
+Before the measured experiment begins:
+
+    version = 1
+
+is established using:
+
+    WRITE CL = ALL
+
+This provides a known baseline state acknowledged by all three replicas.
+
+The setup operation may be retried because it is experimental preparation
+rather than part of the measured client write history.
+
+A persistent preparation failure is recorded separately as:
+
+    SETUP_ERROR
+
+
+8. SEQUENTIAL WRITE HISTORY
+---------------------------
+
+After setup, the same logical client performs five sequential writes:
+
+    WRITE v2
+    WRITE v3
+    WRITE v4
+    WRITE v5
+    WRITE v6
+
+Each write must successfully complete before the next client write is
+issued.
+
+No artificial sleep is inserted between the writes.
+
+The coordinator is independently selected for every write.
+
+
+9. EXPLICIT WRITE TIMESTAMPS
+----------------------------
+
+Cassandra uses timestamps when reconciling conflicting mutations.
+
+To make the logical client order explicit and reproducible, the experiment
+assigns strictly increasing timestamps to the writes.
+
+If the base timestamp is T:
+
+    v2 -> T + 1000 microseconds
+    v3 -> T + 2000 microseconds
+    v4 -> T + 3000 microseconds
+    v5 -> T + 4000 microseconds
+    v6 -> T + 5000 microseconds
+
+Therefore, the intended write ordering is unambiguous:
+
+    v2 < v3 < v4 < v5 < v6
+
+Even if network delay causes mutations to physically reach replicas in a
+different order, Cassandra's timestamp-based reconciliation should prefer
+the logically later mutation.
+
+
+10. DIAGNOSTIC PROBES
+---------------------
+
+Immediately after every successful write, three diagnostic READ ONE
+operations are performed.
+
+Example:
+
+    WRITE v3 successfully completes
+
+        READ ONE probe 1
+        READ ONE probe 2
+        READ ONE probe 3
+
+The coordinator for each probe is independently selected.
+
+With:
+
+    5 writes per trial
+    x 3 probes per write
+    x 200 trials
+
+there can be up to:
+
+    3,000 probes
+
+for each write consistency level.
+
+
+11. PURPOSE OF THE DIAGNOSTIC PROBES
+------------------------------------
+
+The probes measure temporary visibility/propagation of acknowledged writes.
+
+Suppose WRITE ONE successfully writes v4.
+
+A probe may still observe:
+
+    v3
+
+because some replica path has not yet caught up.
+
+This is recorded as:
+
+    stale_probe = True
+
+However:
+
+    A STALE PROBE IS NOT CLASSIFIED AS AN
+    MONOTONIC-WRITES VIOLATION.
+
+It indicates temporary replica lag or visibility delay.
+
+The purpose of the probes is to distinguish:
+
+    propagation behavior
+
+from:
+
+    write-order preservation.
+
+
+12. FINAL RECONCILIATION CHECK
+------------------------------
+
+After all five sequential writes successfully complete, the experiment
+performs:
+
+    READ ALL
+
+The expected final version is:
+
+    v6
+
+because v6 is the last logical write from the client and has the greatest
+explicit timestamp.
+
+Therefore:
+
+    final resolved version = v6
+        -> MW PASS
+
+    final resolved version < v6
+        -> MW FAIL
+
+If one of the experimental operations cannot complete:
+
+        -> ERROR
+
+
+13. IMPORTANT LIMITATION
+------------------------
+
+The experiment does not directly observe every internal state transition
+inside every Cassandra replica.
+
+The final READ ALL checks the reconciled state after the complete client
+write history.
+
+The diagnostic READ ONE probes provide additional evidence about temporary
+propagation, but they are not direct local-storage inspection of a
+specific replica.
+
+Therefore, the experiment tests whether completed sequential client writes
+ultimately resolve according to the intended client order, while using
+diagnostic probes to characterize temporary staleness.
+
+
+14. PRE-EXPERIMENT PREDICTION
+-----------------------------
+
+The prediction was:
+
+    WRITE ONE
+        MW expected to hold for completed write histories.
+
+    WRITE QUORUM
+        MW expected to hold for completed write histories.
+
+    WRITE ALL
+        MW expected to hold for completed write histories.
+
+Therefore, approximately 100% MW success was expected among successfully
+completed trials.
+
+This prediction was based on Cassandra's timestamp-based conflict
+resolution and the experiment's explicitly increasing timestamps.
+
+However, temporary stale diagnostic observations were expected to be more
+common with weaker write consistency levels.
+
+
+15. NORMAL-OPERATION RESULTS
+----------------------------
+
+WRITE ONE
+---------
+
+Requested trials:          200
+Measured trials:           200
+
+MW passes:                 200
+MW violations:               0
+Experimental errors:         0
+Setup errors:                0
+
+Availability:              1.0000
+MW success rate:           1.0000
+
+Completed probes:          3000
+Stale probes:               225
+Stale probe rate:          0.0750
+
+
+WRITE QUORUM
+------------
+
+Requested trials:          200
+Measured trials:           200
+
+MW passes:                 200
+MW violations:               0
+Experimental errors:         0
+Setup errors:                0
+
+Availability:              1.0000
+MW success rate:           1.0000
+
+Completed probes:          3000
+Stale probes:                 3
+Stale probe rate:          0.0010
+
+
+WRITE ALL
+---------
+
+Requested trials:          200
+Measured trials:           200
+
+MW passes:                 198
+MW violations:               0
+Experimental errors:         2
+Setup errors:                0
+
+Availability:              0.9900
+MW success rate:           1.0000
+
+Completed probes:          2976
+Stale probes:                 0
+Stale probe rate:          0.0000
+
+
+16. MAIN CONSISTENCY RESULT
+---------------------------
+
+No monotonic-write violation was observed in any successfully completed
+trial.
+
+Therefore:
+
+    WRITE ONE     -> observed MW success = 100%
+    WRITE QUORUM  -> observed MW success = 100%
+    WRITE ALL     -> observed MW success = 100%
+
+The experimental results therefore agree with the pre-experiment
+prediction for normal operation.
+
+
+17. IMPORTANT SECONDARY RESULT
+------------------------------
+
+Although all completed histories satisfied MW, the diagnostic probes
+showed a major difference in temporary visibility.
+
+Stale probe rates were:
+
+    WRITE ONE       7.50%
+    WRITE QUORUM    0.10%
+    WRITE ALL       0.00%
+
+This demonstrates that:
+
+    monotonic-write ordering
+
+and:
+
+    immediate visibility of a write on every replica/path
+
+are not the same property.
+
+
+18. INTERPRETATION OF WRITE ONE
+-------------------------------
+
+WRITE ONE produced:
+
+    225 stale probes out of 3000
+
+even though:
+
+    200/200 measured trials satisfied MW.
+
+With WRITE ONE, Cassandra can report write success after satisfying the
+ONE acknowledgement requirement.
+
+Other replicas may still be receiving the mutation.
+
+Therefore, an immediate diagnostic read may observe an older value.
+
+Nevertheless, the later sequential writes still ultimately reconciled in
+the correct timestamp order.
+
+
+19. INTERPRETATION OF WRITE QUORUM
+----------------------------------
+
+WRITE QUORUM produced only:
+
+    3 stale probes out of 3000
+
+for a stale-probe rate of:
+
+    0.001
+
+This is substantially lower than WRITE ONE.
+
+Because QUORUM requires acknowledgement sufficient for two replicas in the
+RF=3 deployment, the new mutation has reached a larger acknowledged
+replica set before the write is reported as successful.
+
+This reduces the opportunity for immediate probes to encounter an older
+version.
+
+
+20. INTERPRETATION OF WRITE ALL
+-------------------------------
+
+WRITE ALL produced:
+
+    0 stale probes
+
+among:
+
+    2976 completed probes.
+
+A successful WRITE ALL requires all three replicas to satisfy the write
+acknowledgement requirement before success is returned.
+
+Therefore, once the write completes successfully, immediate diagnostic
+probes are not expected to encounter an older replica state.
+
+However, WRITE ALL had:
+
+    2 experimental errors
+
+giving:
+
+    availability = 0.9900
+
+in this run.
+
+These errors are treated as availability failures rather than MW
+violations.
+
+
+21. CONSISTENCY VS VISIBILITY
+-----------------------------
+
+The experiment illustrates an important distinction.
+
+WRITE ONE:
+
+    MW success             = 100%
+    stale probe rate       = 7.5%
+
+WRITE QUORUM:
+
+    MW success             = 100%
+    stale probe rate       = 0.1%
+
+WRITE ALL:
+
+    MW success             = 100%
+    stale probe rate       = 0%
+
+Therefore, stronger write consistency levels did not improve the measured
+MW success rate in normal operation because all completed histories
+already preserved write order.
+
+However, stronger write consistency substantially reduced temporary stale
+observations.
+
+
+22. CONSISTENCY VS AVAILABILITY
+-------------------------------
+
+An operation that times out is not automatically considered a consistency
+violation.
+
+For WRITE ALL:
+
+    198 trials completed successfully
+    2 encountered experimental errors
+
+Among the successfully completed trials:
+
+    MW success = 100%
+
+Availability is therefore reported separately from consistency success.
+
+This distinction will become especially important in the node-failure and
+network-partition experiments.
+
+
+23. RESULT FILES
+----------------
+
+normal.csv
+
+    Contains individual experimental writes.
+
+    Records information such as:
+
+        trial
+        write step
+        write consistency level
+        write coordinator
+        version
+        timestamp
+        write completion
+        error
+
+
+normal_probes.csv
+
+    Contains diagnostic READ ONE observations.
+
+    Records:
+
+        trial
+        write step
+        probe number
+        latest written version
+        write coordinator
+        probe coordinator
+        observed version
+        stale probe flag
+        probe completion
+
+
+normal_trials.csv
+
+    Contains one row per trial.
+
+    Records:
+
+        write consistency level
+        setup attempts
+        expected writes
+        completed writes
+        expected final version
+        observed final version
+        PASS / FAIL / ERROR / SETUP_ERROR
+
+
+normal_summary.csv
+
+    Contains the aggregate result for:
+
+        WRITE ONE
+        WRITE QUORUM
+        WRITE ALL
+
+    including:
+
+        requested trials
+        measured trials
+        passes
+        violations
+        errors
+        setup errors
+        availability
+        MW success rate
+        completed probes
+        stale probes
+        stale probe rate
+
+
+24. PRIMARY METRIC
+------------------
+
+The primary metric is:
+
+                         MW passes
+    MW success rate = --------------------
+                      completed MW trials
+
+
+25. SECONDARY METRIC
+--------------------
+
+The secondary diagnostic metric is:
+
+                         stale completed probes
+    stale probe rate = --------------------------
+                          completed probes
+
+
+26. FINAL NORMAL-OPERATION CONCLUSION
+-------------------------------------
+
+Under the normal-operation scenario with the configured network delay and
+jitter, no monotonic-write violations were observed for any of the three
+write consistency levels.
+
+All successfully completed client write histories ultimately resolved to
+the client's final write.
+
+However, weaker write consistency levels allowed substantially more
+temporary stale observations immediately after acknowledged writes.
+
+WRITE ONE showed the greatest propagation lag, WRITE QUORUM showed very
+little, and WRITE ALL showed none in the completed probes.
+
+The experiment therefore suggests that, in this deployment, increasing
+the write consistency level primarily improved immediate replica
+visibility rather than the observed monotonic ordering of completed
+sequential writes.

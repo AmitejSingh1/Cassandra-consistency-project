@@ -1,0 +1,258 @@
+WRITES-FOLLOW-READS (WFR) CONSISTENCY
+REVISED THEORETICAL FRAMEWORK, EXPERIMENTAL DESIGN & CAUSAL PROVENANCE
+
+
+1. OBJECTIVE & RESEARCH QUESTIONS
+---------------------------------
+
+The purpose of this investigation is to examine Writes-Follow-Reads (WFR)
+consistency in Apache Cassandra, clearly distinguishing between:
+1. Formal Writes-Follow-Reads session guarantees (Terry et al., 1994)
+2. Stale reads arising from weak read consistency
+3. Lost updates and write conflicts under Cassandra's Last-Write-Wins (LWW)
+4. Transient replica propagation lag
+5. Operation unavailability and timeouts
+
+
+2. THEORETICAL DEFINITION OF WRITES-FOLLOW-READS
+------------------------------------------------
+
+In distributed systems theory (Terry et al., 1994, "Session Guarantees for
+Weakly Consistent Replicated Data"):
+
+    Writes-Follow-Reads (WFR) Guarantee:
+    Writes made by a client session follow any writes that were previously
+    observed (read) by that same session.
+
+    Formally:
+    If a session reads data item X and observes the effects of write W_1,
+    and the session subsequently issues write W_2 (which is causally dependent
+    on or follows the read), then W_2 will only take effect on a database state
+    (or server) that already includes W_1, or a state where W_1 has already
+    been applied.
+
+    Causal Chain:
+        W_1  ---(observed by)--->  Read  ---(causes)--->  W_2
+    Therefore:
+        W_1  --->  W_2  (W_1 causally precedes W_2)
+
+Crucial Distinction:
+If Client B performs a read and observes an OLDER state W_0 (i.e. a stale read,
+failing to observe W_1), then Client B's subsequent write W_2 is causally
+predicated on W_0, NOT on W_1.
+Therefore:
+- A stale read that leads to W_2 overwriting W_1 via LWW is a
+  STALE-READ / CONCURRENT-WRITE-CONFLICT / LOST-UPDATE anomaly.
+- It is NOT automatically a Writes-Follow-Reads violation, because Client B
+  never observed W_1 in its session context!
+
+
+3. WHAT CASSANDRA NATIVELY CAN AND CANNOT EXPOSE
+------------------------------------------------
+
+To design a scientifically honest experiment, we must explicitly document
+what Apache Cassandra's architecture natively provides:
+
+A. What Cassandra DOES NOT Provide:
+1. No Native Causal Context / Session Tracking:
+   Standard CQL clients communicate with coordinators statelessly regarding
+   causality. Cassandra does not attach vector clocks, version vectors, or
+   causal dependency sets to standard read/write requests.
+2. No Multi-Key Causal Transactions:
+   Cassandra does not support cross-partition ACID transactions or cross-key
+   causal delivery trees in standard CQL.
+3. No Native Server-Side Causal Precondition Check:
+   Standard CQL INSERT/UPDATE statements cannot natively express:
+   "Apply W_2 only if the replica has already applied W_1"
+   (Unless using Paxos-based Lightweight Transactions: IF version = V).
+
+B. What Cassandra DOES Provide:
+1. Tunable Consistency Levels (ONE, QUORUM, ALL):
+   Controls how many replica acknowledgements are required before an operation
+   returns, governing the probability of replica overlap (W + R > RF).
+2. Per-Cell Microsecond Timestamps & Last-Write-Wins (LWW):
+   Mutations are reconciled based on timestamps assigned by the coordinator
+   or client driver.
+3. Explicit Per-Operation Coordinator Routing:
+   Using client-side connection pooling and policies (such as
+   WhiteListRoundRobinPolicy), an experiment can direct successive operations
+   to specific cluster nodes, allowing direct observation of replica divergence.
+
+
+4. DIRECT TEST VS. OPERATIONAL PROXY EXPERIMENT
+-----------------------------------------------
+
+Because Cassandra lacks native session-guarantee tracking, we must distinguish
+between a theoretical direct test and an operational proxy:
+
+A. The Theoretical "Direct Test" of WFR:
+   Requires an explicit causal dependency carried by the client:
+   1. Writer A commits W_1(x = v2) with causal id `tx_A2`.
+   2. Client B reads X and explicitly receives `tx_A2`.
+   3. Client B issues W_2 with an explicit dependency tag: `depends_on = tx_A2`.
+   4. The database verifies at every replica:
+      Can W_2 become visible or committed on any replica where `tx_A2` is
+      missing or unapplied?
+   If any replica applies or makes W_2 visible without having applied `tx_A2`,
+   a direct WFR violation has occurred.
+
+B. The Operational Proxy on Cassandra:
+   Since standard Cassandra does not enforce dependency tags at the replica
+   engine, an experiment on Cassandra investigates:
+   1. Single-Item Causal Provenance & State Ordering:
+      Client B reads version V_obs of item X.
+      Client B writes an update that explicitly encodes its causal parent:
+          parent_version = V_obs
+          new_version    = V_obs + 1
+      We examine:
+      a) When Client B observes W_1 (V_obs = 2):
+         Does Client B's subsequent write W_2 (version 3, parent 2)
+         successfully take effect on top of W_1 across all replicas, or can
+         replica lag/inversion cause W_2 to be visible while W_1 was skipped
+         or superseded out of order?
+      b) When Client B experiences a stale read (V_obs = 1):
+         Client B writes version 2 with parent 1.
+         Under Cassandra's LWW timestamping, this write receives timestamp
+         T_B > T_A and clobbers Writer A's write.
+         This is classified as a STALE-READ LOST-UPDATE anomaly, demonstrating
+         that without causal guarantees or quorum intersection, stale reads
+         cause silent clobbering of unobserved concurrent updates.
+
+   2. Cross-Item Causal Order Observation (The Terry et al. Model):
+      If Client B reads W_1 on X (observing X = v2), and writes W_2 on Y
+      (Y = "v2_dependent_on_X_v2"):
+      Can an independent read observe the dependent write Y = "v2" while
+      the prerequisite write X on that replica or coordinator is still at v1?
+      In Terry et al.'s formulation, observing the dependent effect before
+      the prerequisite cause is the hallmark of a causal order violation.
+
+
+5. REVISED EXPERIMENTAL SEQUENCE & CAUSAL PROVENANCE
+----------------------------------------------------
+
+To provide complete scientific clarity, the experiment explicitly tracks
+causal lineage and separates the test into clearly defined phases:
+
+STEP 0: BASELINE INITIALIZATION (CL = ALL)
+- Key X is initialized to:
+      version: 1
+      causal_parent: 0
+      client: "setup"
+- Written with CL=ALL to ensure all 3 replicas reach identical baseline state.
+
+STEP 1: PREREQUISITE WRITE W_1 (Writer A)
+- Writer A updates Key X:
+      version: 2
+      causal_parent: 1
+      client: "writer_A"
+- Written using tested consistency level CL_W1 (ONE, QUORUM, ALL).
+- Waits for Cassandra acknowledgement.
+
+STEP 2: CLIENT READ (Client B)
+- Client B reads Key X using tested consistency level CL_R (ONE, QUORUM, ALL).
+- Read coordinator is selected independently at random.
+- Client B records:
+      observed_version: V_obs
+      observed_parent:  P_obs
+- Classification at this step:
+  - If V_obs == 2: FRESH READ (Prerequisite observed; causal context established).
+  - If V_obs == 1: STALE READ (Prerequisite missed due to replica lag).
+  - If Read fails: OPERATION_FAILURE (Timeout / Unavailable).
+
+STEP 3: CAUSALLY DEPENDENT WRITE W_2 (Client B)
+- Client B computes its update carrying explicit causal provenance:
+      new_version   = V_obs + 1
+      causal_parent = V_obs
+      value         = f"v{V_obs + 1}_derived_from_v{V_obs}"
+      client        = "client_B"
+- Client B issues write W_2 using tested consistency level CL_W2 (ONE, QUORUM).
+- Coordinator is selected independently at random.
+
+STEP 4: STATE AUDIT & RECONCILIATION VERIFICATION
+- Diagnostic Probes (CL = ONE):
+  Immediately inspect each node to determine what version and causal parent
+  are locally visible.
+- Reconciled Read (CL = ALL):
+  Verify the final converged state across the cluster.
+
+
+6. EXACT CLASSIFICATION OF OUTCOMES
+-----------------------------------
+
+Every trial is classified into one of the following mutually exclusive categories:
+
+1. VALID_CAUSAL_PROGRESSION (WFR Preserved):
+   - Condition: Client B observed V_obs = 2 (fresh read).
+   - Client B issued W_2 (version 3, parent 2).
+   - Final reconciliation resolves to version 3 with causal parent 2.
+   - Result: WFR satisfied. Causal lineage v1 -> v2 -> v3 is fully preserved.
+
+2. GENUINE WFR VIOLATION (Causal Inversion / Skipped Prerequisite):
+   - Condition: Client B observed V_obs = 2 (fresh read) and issued W_2.
+   - However, a replica or probe reflects W_2 taking effect while the prerequisite
+     write W_1 (v2) was rejected, lost, or overwritten by an older state.
+   - Or, in cross-item testing: the dependent write is visible on a replica that
+     has not applied the prerequisite read state.
+
+3. STALE_READ_LOST_UPDATE (LWW Conflict / Stale Read Anomaly):
+   - Condition: Client B observed V_obs = 1 (stale read; did not observe W_1).
+   - Client B issued W_2 (version 2, parent 1).
+   - Because T_B > T_A, Cassandra's LWW overwrote Writer A's v2.
+   - Result: STALE-READ LOST-UPDATE.
+     *** NOT A WFR VIOLATION ***, because Client B never observed W_1.
+     It is an empirical demonstration of how weak read consistency causes
+     silent lost updates under LWW conflict resolution.
+
+4. REPLICA_LAG_TRANSIENT_STALENESS:
+   - Immediate CL=ONE diagnostic probe observes an older version, while the
+     cluster subsequently converges to the latest write.
+   - Recorded as transient propagation delay, NOT as a consistency violation.
+
+5. OPERATION_FAILURE / UNAVAILABLE / TIMEOUT:
+   - Cassandra threw ReadTimeout, WriteTimeout, or UnavailableException.
+   - Recorded strictly as an AVAILABILITY outcome, never as a consistency violation.
+
+6. SETUP_ERROR:
+   - Failure during baseline initialization (Step 0). Excluded from consistency
+     metrics.
+
+
+7. CONSISTENCY-LEVEL HYPOTHESES (PREDICTIONS)
+---------------------------------------------
+
+A. When CL_W1 + CL_R > RF (e.g. QUORUM/QUORUM, ALL/ONE, ONE/ALL):
+   - Theoretical Expectation: Quorum intersection guarantees that Client B's
+     read overlaps with at least one replica that acknowledged W_1.
+   - Prediction: Stale read rate will be 0.000.
+   - All completed trials are expected to establish fresh causal context (V_obs = 2)
+     and produce VALID_CAUSAL_PROGRESSION (v1 -> v2 -> v3).
+
+B. When CL_W1 + CL_R <= RF (e.g. ONE/ONE, ONE/QUORUM, QUORUM/ONE):
+   - Theoretical Expectation: Quorum intersection is NOT satisfied. The read
+     coordinator may query a replica that has not yet received W_1.
+   - Prediction: Stale reads (V_obs = 1) will be observed at a rate dependent
+     on network delay and replica propagation.
+   - Stale reads will trigger STALE_READ_LOST_UPDATE events under LWW.
+   - Genuine WFR violations are NOT expected among fresh-read trials in normal
+     operation unless timestamp skew or coordinator reordering occurs.
+
+C. Degraded Conditions (Node Failure & Partition):
+   - With 1 node down, CL=ALL operations will predictably fail (UNAVAILABLE).
+   - CL=QUORUM remains available (2/2 surviving replicas respond).
+   - Under partition, an isolated replica accepting CL=ONE writes will produce
+     divergent state branches that resolve via LWW upon healing.
+
+
+8. REPORTING & METRICS
+----------------------
+
+Primary WFR Consistency Metric:
+                              WFR Passes (Fresh Read & Valid Causal Progression)
+    WFR Causal Success Rate = --------------------------------------------------
+                                      Completed Fresh-Read Trials
+
+Secondary Metrics (Reported Separately):
+    Stale Read Rate     = Stale Reads (V_obs = 1) / Completed Reads
+    Lost Update Rate    = Stale-Read Overwrite Events / Total Completed Trials
+    System Availability = Completed Operations / Total Attempted Operations
+
