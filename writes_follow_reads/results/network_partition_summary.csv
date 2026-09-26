@@ -1,0 +1,10 @@
+path_id,description,w1_comp,w1_cl,read_comp,read_cl,w2_comp,w2_cl,total_trials,fresh_reads,stale_reads,lineage_preserved,lineage_not_observed,stale_read_lost_updates,stale_read_branch_converged,operation_failures,unavailable_all_failures,unavailable_quorum_failures,write_timeouts,read_timeouts,setup_errors
+P1,"Cross-Partition (I -> M, W1=ONE, R=ONE)",I,ONE,M,ONE,M,QUORUM,20,0,20,0,0,20,0,0,0,0,0,0,0
+P2,"Cross-Partition (I -> M, W1=ONE, R=QUORUM)",I,ONE,M,QUORUM,M,QUORUM,20,0,20,0,0,20,0,0,0,0,0,0,0
+P3,"Cross-Partition (M -> I, W1=QUORUM, R=ONE)",M,QUORUM,I,ONE,M,QUORUM,20,0,20,0,0,20,0,0,0,0,0,0,0
+P4,"Intra-Majority (M -> M, W1=QUORUM, R=QUORUM)",M,QUORUM,M,QUORUM,M,QUORUM,20,20,0,20,0,0,0,0,0,0,0,0,0
+P5,"Intra-Majority (M -> M, W1=ONE, R=ONE)",M,ONE,M,ONE,M,QUORUM,20,20,0,20,0,0,0,0,0,0,0,0,0
+P6,"Availability Boundary (M, W1=ALL)",M,ALL,M,ONE,M,QUORUM,20,0,0,0,0,0,0,20,0,0,20,0,0
+P7,"Availability Boundary (M, Read=ALL)",M,QUORUM,M,ALL,M,QUORUM,20,0,0,0,0,0,0,20,0,0,0,20,0
+P8,"Minority Quorum Boundary (I, W1=QUORUM)",I,QUORUM,M,ONE,M,QUORUM,20,0,0,0,0,0,0,20,0,0,20,0,0
+P9,"Minority Causal Trap (I, W2=QUORUM)",M,QUORUM,I,ONE,I,QUORUM,20,0,20,0,0,0,0,20,0,0,20,0,0

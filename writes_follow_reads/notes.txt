@@ -256,3 +256,70 @@ Secondary Metrics (Reported Separately):
     Lost Update Rate    = Stale-Read Overwrite Events / Total Completed Trials
     System Availability = Completed Operations / Total Attempted Operations
 
+
+9. NETWORK PARTITION SCENARIO METHODOLOGY
+------------------------------------------
+
+A. Partition Topology & Network Isolation:
+   - Symmetric partition divides the 3-node cluster (RF=3) into:
+     * Majority Component (M): cassandra1 (172.18.0.3), cassandra2 (172.18.0.4)
+     * Minority Component (I): cassandra3 (172.18.0.2)
+   - Isolation Mechanism:
+     * Kernel blackhole routing (ip route add/del blackhole) blocks inter-node
+       traffic (ports 7000/7001) between {cassandra1, cassandra2} and cassandra3.
+     * cassandra1 <-> cassandra2 remains fully available.
+     * Host client access (localhost:9042..9044) remains fully available.
+
+B. Coordinator-Routing & Causal Path Matrix:
+   - P1: Cross-Partition (I -> M)
+     W1: Node 3 (CL=ONE) | Read: Node 1/2 (CL=ONE) | W2: Node 1/2 (CL=QUORUM)
+   - P2: Cross-Partition (I -> M)
+     W1: Node 3 (CL=ONE) | Read: Node 1/2 (CL=QUORUM) | W2: Node 1/2 (CL=QUORUM)
+   - P3: Cross-Partition (M -> I)
+     W1: Node 1/2 (CL=QUORUM) | Read: Node 3 (CL=ONE) | W2: Node 1/2 (CL=QUORUM)
+   - P4: Intra-Majority (M -> M)
+     W1: Node 1/2 (CL=QUORUM) | Read: Node 1/2 (CL=QUORUM) | W2: Node 1/2 (CL=QUORUM)
+   - P5: Intra-Majority (M -> M)
+     W1: Node 1/2 (CL=ONE) | Read: Node 1/2 (CL=ONE) | W2: Node 1/2 (CL=QUORUM)
+   - P6: Availability Boundary
+     W1: Node 1/2 (CL=ALL) | Read: Node 1/2 (CL=ONE) | W2: Node 1/2 (CL=QUORUM)
+   - P7: Availability Boundary
+     W1: Node 1/2 (CL=QUORUM) | Read: Node 1/2 (CL=ALL) | W2: Node 1/2 (CL=QUORUM)
+   - P8: Minority Quorum Boundary
+     W1: Node 3 (CL=QUORUM) | Read: Node 1/2 (CL=ONE) | W2: Node 1/2 (CL=QUORUM)
+   - P9: Minority Causal Trap
+     W1: Node 1/2 (CL=QUORUM) | Read: Node 3 (CL=ONE) | W2: Node 3 (CL=QUORUM)
+
+C. Methodological Distinctions & Expected Behavior:
+   1. Stale Read Expectations in Cross-Partition Paths (P1, P2, P3):
+      - Expected to observe stale reads under the intended partition routing;
+        the actual stale/fresh outcome will be measured empirically.
+   2. LWW Reconciliation Outcome in P1, P2, P3:
+      - An expected LWW lost-update anomaly if the stale dependent write receives
+        the later effective timestamp; the actual final state will be measured.
+   3. Stale Reads vs. WFR Violations:
+      - P1, P2, and P3 primarily test partition-induced stale visibility and
+        resulting LWW/lost-update behavior. They are NOT themselves WFR
+        violations when Reader B observes v1 rather than Writer A's v2.
+      - A genuine WFR violation classification requires:
+        * Reader B actually observes v2,
+        * B subsequently completes a dependent write based on v2,
+        * and the final reconciliation fails to observe that dependent write.
+      - STALE_READ_LOST_UPDATE is strictly an LWW concurrency anomaly,
+        NOT a WFR violation.
+   4. Failure Classification:
+      - Operation failures are categorized under OPERATION_FAILURE with the
+        exact failure mechanism recorded: UNAVAILABLE_ALL, UNAVAILABLE_QUORUM,
+        WRITE_TIMEOUT, or READ_TIMEOUT.
+      - Operation failures represent availability limits under partition,
+        never WFR consistency violations.
+
+D. Per-Trial Lifecycle:
+   1. Pre-trial verification: 3 x UN, CQL ports open, schema agreed.
+   2. Step 0: Baseline v1 written with CL=ALL while cluster is healthy.
+   3. Inject partition: Apply blackhole routes.
+   4. Execute causal sequence under degraded state.
+   5. Heal partition: Remove blackhole routes in guaranteed finally block.
+   6. Post-healing check: Verify describecluster (Live=3, Unreachable=0).
+   7. Step 5: Final reconciliation probe at CL=QUORUM across healed ring.
+

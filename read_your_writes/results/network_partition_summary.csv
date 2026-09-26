@@ -1,0 +1,10 @@
+path,description,write_component,read_component,write_cl,read_cl,trials,passes,violations,operation_failures,setup_errors,availability,ryw_success_rate,different_coordinator_trials,unavailable_all_failures,unavailable_quorum_failures,timeout_failures,other_failures
+P1,"Intra-majority quorum (M -> M, W=QUORUM, R=QUORUM)",M,M,QUORUM,QUORUM,20,20,0,0,0,1.0,1.0,7,0,0,0,0
+P2,"Cross-partition stale read (M -> I, W=QUORUM, R=ONE)",M,I,QUORUM,ONE,20,0,15,5,0,0.75,0.0,20,0,0,5,0
+P3,"Cross-partition stale read (M -> I, W=ONE, R=ONE)",M,I,ONE,ONE,20,0,16,4,0,0.8,0.0,20,0,0,4,0
+P4,"Intra-minority local RYW (I -> I, W=ONE, R=ONE)",I,I,ONE,ONE,20,19,0,1,0,0.95,1.0,0,0,0,1,0
+P5,"Cross-partition stale read (I -> M, W=ONE, R=ONE)",I,M,ONE,ONE,20,0,20,0,0,1.0,0.0,20,0,0,0,0
+P6,"Intra-majority local RYW (M -> M, W=ONE, R=ONE)",M,M,ONE,ONE,20,20,0,0,0,1.0,1.0,7,0,0,0,0
+P7,"Intra-majority quorum write / local read (M -> M, W=QUORUM, R=ONE)",M,M,QUORUM,ONE,20,20,0,0,0,1.0,1.0,13,0,0,0,0
+P8,"Write availability boundary (M -> M, W=ALL, R=ONE)",M,M,ALL,ONE,20,0,0,20,0,0.0,0.0,12,0,0,20,0
+P9,"Read availability boundary (M -> M, W=ONE, R=ALL)",M,M,ONE,ALL,20,0,0,20,0,0.0,0.0,10,0,0,20,0

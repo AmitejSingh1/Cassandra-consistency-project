@@ -484,3 +484,242 @@ means that no violation was observed during those trials.
 
 Experimental observation should be distinguished from a theoretical
 consistency guarantee.
+
+
+================================================================================
+READ-YOUR-WRITES (RYW) CONSISTENCY – NODE FAILURE EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Read-Your-Writes (RYW) consistency when a single replica crashes immediately
+after a write has been acknowledged to the client.
+
+RYW consistency requires that after a single logical client completes a write
+(v2), any subsequent read by that same client must observe v2 or a newer value.
+
+Under single-node crash-stop failure (RF=3):
+- Replicas: cassandra1, cassandra2, cassandra3.
+- Target failed node: cassandra3 is stopped during the degraded phase.
+- Surviving nodes: cassandra1, cassandra2 remain online and handle degraded reads.
+
+
+2. CONFIGURATION MATRIX
+-----------------------
+All 9 combinations of Write CL x Read CL are evaluated:
+  - WRITE ONE     / READ ONE
+  - WRITE ONE     / READ QUORUM
+  - WRITE ONE     / READ ALL
+  - WRITE QUORUM  / READ ONE
+  - WRITE QUORUM  / READ QUORUM
+  - WRITE QUORUM  / READ ALL
+  - WRITE ALL     / READ ONE
+  - WRITE ALL     / READ QUORUM
+  - WRITE ALL     / READ ALL
+
+
+3. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+Each trial executes an independent failure/recovery lifecycle:
+
+Phase 1: Pre-trial Health Verification
+  - Query nodetool status: verify all 3 nodes report 'UN'.
+  - Query nodetool describecluster: verify Live=3, Unreachable=0, schema agreed.
+  - Verify native CQL ports (9042, 9043, 9044) are open.
+
+Phase 2: Baseline State Establishment (v1)
+  - Write initial version v1 with CL=ALL while all 3 nodes are healthy.
+  - Retried up to 3 times to ensure clean baseline without transient socket drops.
+
+Phase 3: Client Write (v2)
+  - Issue write v2 with the tested write_cl across the healthy 3-node cluster.
+  - The write coordinator is chosen among all 3 nodes (cassandra1, cassandra2,
+    or cassandra3). This directly captures cases where the write coordinator is
+    the node about to crash.
+
+Phase 4: Node Failure Injection
+  - Gracefully close client session to cassandra3.
+  - Stop container cassandra3 ('docker stop -t 2 cassandra3').
+  - Verify container is stopped ('docker inspect').
+
+Phase 5: Degraded Client Read (RYW Read)
+  - The same logical client immediately issues a read for the trial key at read_cl.
+  - The read coordinator is chosen from surviving nodes (cassandra1 or cassandra2).
+  - If read_cl == ALL: Cassandra cannot satisfy ALL (requires 3, only 2 alive).
+    This raises UnavailableException and is classified as OPERATION_FAILURE
+    (UNAVAILABLE_ALL), NOT as an RYW violation.
+  - If read succeeds:
+    - observed_version == 2 -> PASS
+    - observed_version == 1 -> RYW_VIOLATION (stale read)
+
+Phase 6: Node Recovery and Cluster Healing (finally block)
+  - Restart container cassandra3 ('docker start cassandra3').
+  - Poll until all 3 nodes report 'UN', ports open, Live=3, Unreachable=0,
+    and schema agreement is restored.
+
+Phase 7: Post-Recovery Reconciliation Probe
+  - Issue a read at CL=QUORUM across the healed cluster to record final state.
+
+Phase 8: Trial Logging
+  - Record complete trial parameters, coordinators, observed version,
+    classification, and failure mechanism into node_failure.csv.
+
+
+4. CLASSIFICATION TAXONOMY
+--------------------------
+1. PASS:
+   The client successfully reads version 2 (the version it wrote).
+
+2. RYW_VIOLATION:
+   The client successfully reads version 1 (stale read) after writing version 2.
+   Occurs notably when Write CL=ONE lands on cassandra3 which promptly crashes,
+   leaving surviving nodes with only version 1.
+
+3. OPERATION_FAILURE:
+   The operation could not complete due to availability constraints.
+   - UNAVAILABLE_ALL: Consistency level ALL could not be satisfied with 2 nodes.
+   - UNAVAILABLE_QUORUM: Quorum could not be reached.
+   - WRITE_TIMEOUT / READ_TIMEOUT: Operation timed out.
+   Critically, operation failures are NEVER classified as RYW violations.
+
+4. SETUP_ERROR:
+   The pre-trial baseline write (CL=ALL) failed after retries before injection.
+
+
+5. OUTPUT ARTIFACTS
+-------------------
+- read_your_writes/results/node_failure.csv (raw trial observations)
+- read_your_writes/results/node_failure_summary.csv (aggregated metrics)
+
+
+================================================================================
+READ-YOUR-WRITES (RYW) CONSISTENCY – NETWORK PARTITION EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Read-Your-Writes (RYW) consistency under a network partition.
+
+Read-Your-Writes requires that after a single client writes version v2 to a key,
+its subsequent read on that key must observe v2 or a newer value.
+
+Under network partition, the critical question is whether a write acknowledged
+by one partition component is visible to the client's subsequent read when
+routed through a coordinator in the same or opposite component.
+
+
+2. PARTITION TOPOLOGY
+---------------------
+A symmetric partition is injected into the RF=3 cluster:
+  - Majority component (M): cassandra1 (172.18.0.3), cassandra2 (172.18.0.4)
+  - Minority component (I): cassandra3 (172.18.0.2)
+  - Blocked links:
+      cassandra1 <-> cassandra3 (bidirectional blackhole route)
+      cassandra2 <-> cassandra3 (bidirectional blackhole route)
+  - Intact link:
+      cassandra1 <-> cassandra2 (connected)
+
+Host-to-container CQL ports (9042, 9043, 9044) remain available from the host
+test runner, enabling explicit coordinator targeting across partition components.
+
+
+3. COORDINATOR ROUTING PATHS (P1–P9)
+------------------------------------
+Nine distinct coordinator-routing paths are evaluated:
+
+P1: Intra-majority quorum (M -> M, W=QUORUM, R=QUORUM)
+  - Write: Majority coordinator, CL=QUORUM. Feasible (2 replicas in M).
+  - Read: Majority coordinator, CL=QUORUM. Feasible (2 replicas in M).
+  - Expected outcome: PASS (v2 observed).
+
+P2: Cross-partition read on minority after majority quorum write (M -> I, W=QUORUM, R=ONE)
+  - Write: Majority coordinator, CL=QUORUM. Feasible (acknowledged by cassandra1/2).
+  - Read: Minority coordinator (cassandra3), CL=ONE. Feasible locally on cassandra3.
+  - Expected outcome: RYW_VIOLATION (stale read observing v1, as cassandra3 is isolated).
+
+P3: Cross-partition read on minority after majority CL=ONE write (M -> I, W=ONE, R=ONE)
+  - Write: Majority coordinator, CL=ONE. Feasible on majority.
+  - Read: Minority coordinator (cassandra3), CL=ONE. Feasible locally on cassandra3.
+  - Expected outcome: RYW_VIOLATION (stale read observing v1).
+
+P4: Intra-minority local RYW (I -> I, W=ONE, R=ONE)
+  - Write: Minority coordinator (cassandra3), CL=ONE. Feasible locally.
+  - Read: Minority coordinator (cassandra3), CL=ONE. Feasible locally.
+  - Expected outcome: PASS (v2 observed locally on the isolated node).
+
+P5: Cross-partition read on majority after minority CL=ONE write (I -> M, W=ONE, R=ONE)
+  - Write: Minority coordinator (cassandra3), CL=ONE. Feasible locally on cassandra3.
+  - Read: Majority coordinator, CL=ONE. Feasible locally on majority.
+  - Expected outcome: RYW_VIOLATION (stale read observing v1, as majority never received v2).
+
+P6: Intra-majority local RYW (M -> M, W=ONE, R=ONE)
+  - Write: Majority coordinator, CL=ONE. Feasible.
+  - Read: Majority coordinator, CL=ONE. Feasible.
+  - Expected outcome: Empirical evaluation; in normal intra-majority networking, PASS.
+
+P7: Intra-majority quorum write / local read (M -> M, W=QUORUM, R=ONE)
+  - Write: Majority coordinator, CL=QUORUM. Feasible (both majority nodes updated).
+  - Read: Majority coordinator, CL=ONE. Feasible.
+  - Expected outcome: PASS (v2 observed).
+
+P8: Write availability boundary (M -> M, W=ALL, R=ONE)
+  - Write: Majority coordinator, CL=ALL. INFEASIBLE (requires 3 replicas, only 2 reachable).
+  - Expected outcome: OPERATION_FAILURE (UNAVAILABLE_ALL or WRITE_TIMEOUT). Read skipped.
+
+P9: Read availability boundary (M -> M, W=ONE, R=ALL)
+  - Write: Majority coordinator, CL=ONE. Feasible on majority.
+  - Read: Majority coordinator, CL=ALL. INFEASIBLE (requires 3 replicas, only 2 reachable).
+  - Expected outcome: OPERATION_FAILURE (UNAVAILABLE_ALL or READ_TIMEOUT).
+
+
+4. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+1. Pre-trial Health Verification:
+   - Ensure blackholes removed and poll until UN x 3, ports open, and schema agreed.
+2. Baseline Setup (v1):
+   - Written at CL=ALL while all 3 nodes are healthy (retried up to 3 times).
+   - Setup coordinators are chosen strictly from majority nodes (cassandra1, cassandra2).
+     Because cassandra1 and cassandra2 maintain uninterrupted mutual connectivity
+     throughout the experiment, their internode communication is never severed.
+     Restricting baseline setup to majority nodes and re-randomizing the coordinator
+     on each retry prevents coupling pre-trial setup to the transient socket recovery
+     of the previously isolated minority node (cassandra3).
+   - If baseline v1 cannot be established after 3 retries, the trial records SETUP_ERROR
+     and terminates without injecting the partition.
+3. Inject Partition:
+   - Install blackhole routes between cassandra1/2 and cassandra3.
+4. Client Write (v2):
+   - Issue write of v2 through assigned component coordinator and write_cl.
+   - If write fails, classify as OPERATION_FAILURE and skip read.
+5. Degraded Client Read:
+   - If write completed, read trial key through assigned component coordinator and read_cl.
+   - If read fails due to availability/timeout, classify as OPERATION_FAILURE.
+   - If read succeeds, compare observed_version against written version (v2).
+6. Partition Healing (finally block):
+   - Remove blackhole routes unconditionally.
+   - Wait for full cluster recovery (UN x 3, Live=3, Unreachable=0, schema agreement).
+7. Post-Recovery Reconciliation Probe:
+   - Read key at CL=QUORUM across healed cluster to record reconciled state.
+8. Raw Observation Logging:
+   - Record trial row into network_partition.csv.
+
+
+5. CLASSIFICATION RULES
+-----------------------
+- PASS:
+  Client reads version 2 (the version it just wrote).
+- RYW_VIOLATION:
+  Client reads version 1 (stale read) after write of version 2 completed.
+- OPERATION_FAILURE:
+  Availability exception during write or read (UNAVAILABLE_ALL, UNAVAILABLE_QUORUM, WRITE_TIMEOUT, READ_TIMEOUT).
+  Operation failures are strictly isolated from consistency violations.
+- SETUP_ERROR:
+  Failure to establish pre-trial baseline v1 prior to partition injection.
+
+
+6. OUTPUT ARTIFACTS
+-------------------
+- read_your_writes/results/network_partition.csv (raw trial observations)
+- read_your_writes/results/network_partition_summary.csv (aggregated metrics per path)
