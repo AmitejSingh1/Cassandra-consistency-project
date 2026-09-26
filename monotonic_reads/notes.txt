@@ -922,3 +922,174 @@ Phase 8: Trial Logging
 -------------------
 - monotonic_reads/results/node_failure.csv (raw trial observations)
 - monotonic_reads/results/node_failure_summary.csv (aggregated metrics)
+
+
+================================================================================
+MONOTONIC READS (MR) CONSISTENCY – NETWORK PARTITION EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Monotonic-Read (MR) consistency when a symmetric network partition isolates a
+minority node from the majority cluster while client reads traverse partition
+boundaries.
+
+Monotonic Reads requires that if a logical client observes version v_a at logical
+time t1, any subsequent read by the same logical client on that key at logical
+time t2 > t1 must never observe an older version v_b < v_a.
+
+
+2. TOPOLOGY AND PARTITION MECHANICS
+-----------------------------------
+The 3-node cluster (RF=3) is divided into:
+- Majority Component (M): cassandra1 (172.18.0.3), cassandra2 (172.18.0.4)
+- Minority Component (I): cassandra3 (172.18.0.2)
+
+Partition injection utilizes Linux kernel blackhole routing tables on all three
+containers:
+- cassandra1: ip route replace blackhole 172.18.0.2
+- cassandra2: ip route replace blackhole 172.18.0.2
+- cassandra3: ip route replace blackhole 172.18.0.3
+- cassandra3: ip route replace blackhole 172.18.0.4
+
+This drops internode packets between {c1, c2} and {c3} with zero TCP RST or ICMP
+unreachable signals.
+The link between cassandra1 and cassandra2 remains intact with normal latency.
+
+
+3. ANOMALY MECHANISM: MONOTONIC READ REGRESSION (v2 -> v1)
+----------------------------------------------------------
+Under a network partition:
+1. When v2 is written to the majority component (M) at CL=QUORUM or CL=ONE:
+   - Replicas in M (c1, c2) receive the v2 update.
+   - The minority node (c3) receives no messages and retains baseline v1.
+2. If a single client issues Read 1 to Majority (M) at CL=QUORUM or CL=ONE:
+   - Read 1 returns v2.
+3. If that same client subsequently issues Read 2 to Minority (I, cassandra3) at CL=ONE:
+   - cassandra3 serves the read locally from its storage engine without consulting M.
+   - cassandra3 returns baseline v1.
+4. Result: The client observes v2, and then observes v1 (v2 -> v1).
+   This is an empirical Monotonic-Read violation (MR_VIOLATION).
+
+Similarly:
+- Writing v2 to Minority (I) at CL=ONE updates cassandra3 locally.
+- Read 1 to Minority (I) returns v2.
+- Read 2 to Majority (M) at CL=ONE contacts c1/c2, which never received v2 and
+  return baseline v1.
+- Result: v2 -> v1 MR_VIOLATION.
+
+
+4. THE 9 EXPLICIT COORDINATOR ROUTING PATHS (P1–P9)
+---------------------------------------------------
+Path P1: Intra-majority quorum
+  - Routing: Write M -> Read 1 M -> Read 2 M
+  - Levels: W=QUORUM, R1=QUORUM, R2=QUORUM
+  - Expected: PASS (v2 -> v2; quorum intersection across M guarantees monotonicity)
+
+Path P2: Cross-component regression
+  - Routing: Write M -> Read 1 M -> Read 2 I
+  - Levels: W=QUORUM, R1=QUORUM, R2=ONE
+  - Expected: MR_VIOLATION (v2 -> v1; R1 reads updated M, R2 reads isolated I)
+
+Path P3: Cross-component regression
+  - Routing: Write M -> Read 1 M -> Read 2 I
+  - Levels: W=ONE, R1=ONE, R2=ONE
+  - Expected: MR_VIOLATION (v2 -> v1; R1 reads updated M, R2 reads isolated I)
+
+Path P4: Intra-minority local MR
+  - Routing: Write I -> Read 1 I -> Read 2 I
+  - Levels: W=ONE, R1=ONE, R2=ONE
+  - Expected: PASS (v2 -> v2; all operations confined to isolated minority node)
+
+Path P5: Cross-component regression
+  - Routing: Write I -> Read 1 I -> Read 2 M
+  - Levels: W=ONE, R1=ONE, R2=ONE
+  - Expected: MR_VIOLATION (v2 -> v1; R1 reads updated I, R2 reads untouched M)
+
+Path P6: Intra-majority local MR
+  - Routing: Write M -> Read 1 M -> Read 2 M
+  - Levels: W=ONE, R1=ONE, R2=ONE
+  - Expected: PASS (v2 -> v2; both reads hit majority component)
+
+Path P7: Intra-majority quorum write / local reads
+  - Routing: Write M -> Read 1 M -> Read 2 M
+  - Levels: W=QUORUM, R1=ONE, R2=ONE
+  - Expected: PASS (v2 -> v2; quorum write acknowledged across {c1, c2})
+
+Path P8: Write availability boundary
+  - Routing: Write M -> Read 1 M -> Read 2 M
+  - Levels: W=ALL, R1=ONE, R2=ONE
+  - Expected: OPERATION_FAILURE (WRITE_TIMEOUT; ALL requires 3 nodes, only 2 reachable)
+
+Path P9: Read availability boundary
+  - Routing: Write M -> Read 1 M -> Read 2 M
+  - Levels: W=ONE, R1=ONE, R2=ALL
+  - Expected: OPERATION_FAILURE (READ_TIMEOUT; ALL read requires 3 nodes, only 2 reachable)
+
+
+5. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+Phase 1: Pre-trial Health Verification
+  - Query nodetool status: verify all 3 nodes report 'UN'.
+  - Query nodetool describecluster: verify Live=3, Unreachable=0, schema agreed.
+  - Verify native CQL ports (9042, 9043, 9044) are open.
+
+Phase 2: Baseline State Establishment (v1)
+  - Write initial version v1 with CL=ALL while all 3 nodes are healthy.
+  - Setup coordinator is selected strictly from majority nodes (cassandra1, cassandra2)
+    and re-randomized inside the retry loop.
+    This guarantees baseline setup never hangs on transient socket reconnection
+    to cassandra3 following previous healing cycles.
+
+Phase 3: Inject Symmetric Network Partition
+  - Install blackhole routes on cassandra1, cassandra2, and cassandra3.
+  - Sleep 1.0s to allow kernel route tables to take effect.
+
+Phase 4: Writer Write (v2)
+  - Issue write at path's write_cl via assigned write coordinator component.
+  - If write fails (e.g. CL=ALL in P8), classify as OPERATION_FAILURE and skip reads.
+
+Phase 5: Two Degraded Sequential Reads (Read 1 & Read 2)
+  - Issue Read 1 at read1_cl via assigned read1 coordinator component.
+  - Only after Read 1 completes, issue Read 2 at read2_cl via assigned read2 coordinator component.
+  - If Read 1 fails (e.g. timeout), classify as OPERATION_FAILURE and skip Read 2.
+  - If Read 2 fails (e.g. CL=ALL in P9), classify as OPERATION_FAILURE.
+  - If both complete:
+    - If read1_version <= read2_version: PASS
+    - If read1_version == 2 and read2_version == 1: MR_VIOLATION
+
+Phase 6: Partition Healing & Cluster Recovery (finally block)
+  - Remove all blackhole routes via 'ip route del blackhole'.
+  - Poll until all 3 nodes report UN, Live=3, Unreachable=0, and schema agreed.
+
+Phase 7: Post-Recovery Reconciliation Probe
+  - Issue read at CL=QUORUM across healed cluster to record reconciled state.
+
+Phase 8: Trial Logging
+  - Record complete trial parameters, coordinators, read 1/2 versions,
+    regression flag, classification, and failure mechanism into network_partition.csv.
+
+
+6. CLASSIFICATION TAXONOMY
+--------------------------
+1. PASS:
+   first_read_version <= second_read_version (non-decreasing sequence).
+
+2. MR_VIOLATION:
+   first_read_version == 2 and second_read_version == 1 (version regression).
+
+3. OPERATION_FAILURE:
+   Operation could not complete due to partition constraints:
+   - WRITE_TIMEOUT on CL=ALL write in P8.
+   - READ_TIMEOUT on CL=ALL read in P9.
+   Failed operations are NEVER classified as MR violations.
+
+4. SETUP_ERROR:
+   Pre-trial baseline write (CL=ALL) failed after retries prior to injection.
+
+
+7. OUTPUT ARTIFACTS
+-------------------
+- monotonic_reads/results/network_partition.csv (raw trial observations)
+- monotonic_reads/results/network_partition_summary.csv (aggregated metrics)
