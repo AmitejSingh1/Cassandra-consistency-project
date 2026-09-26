@@ -674,3 +674,131 @@ The experiment therefore suggests that, in this deployment, increasing
 the write consistency level primarily improved immediate replica
 visibility rather than the observed monotonic ordering of completed
 sequential writes.
+
+
+================================================================================
+MONOTONIC WRITES (MW) CONSISTENCY – NODE FAILURE EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Monotonic-Write (MW) consistency for sequential writes issued by the same logical
+client across a single-node crash-stop failure boundary.
+
+Monotonic Writes requires that if a logical client issues write W1 (e.g. v2) and
+subsequently issues write W2 (e.g. v3), the database must apply W1 before W2,
+and the earlier write W1 must never supersede or overwrite the later write W2.
+
+
+2. NODE FAILURE TOPOLOGY AND TARGET
+-----------------------------------
+The 3-node cluster (RF=3) consists of:
+- cassandra1 (localhost:9042)
+- cassandra2 (localhost:9043)
+- cassandra3 (localhost:9044)
+
+Target crashed node:
+- cassandra3 is stopped ('docker stop -t 2 cassandra3') to inject a single-node crash.
+
+Surviving nodes:
+- cassandra1 and cassandra2 remain online and serve client requests during the degraded period.
+
+
+3. SEQUENTIAL WRITE PROTOCOL AND EXPLICIT TIMESTAMPS
+----------------------------------------------------
+Cassandra relies on Last-Write-Wins (LWW) cell timestamps for reconciling concurrent
+or out-of-order mutations on the same key.
+
+To make the logical client's sequential write order explicit and deterministic:
+- Base timestamp T is established in microseconds.
+- Write 1 (W1): version = 2, timestamp T1 = T + 1000 microseconds.
+  Issued while all 3 nodes are alive. Coordinator is selected randomly from all 3 nodes.
+- Failure Injection: cassandra3 is stopped.
+- Write 2 (W2): version = 3, timestamp T2 = T + 2000 microseconds (> T1).
+  Issued while cassandra3 is stopped. Coordinator is selected randomly from surviving nodes
+  (cassandra1, cassandra2).
+- Recovery: cassandra3 is restarted.
+
+This creates the classic distributed write-ordering test under failure:
+- cassandra3 may have received W1 (v2) before crashing.
+- cassandra1 and cassandra2 received W2 (v3) while cassandra3 was dead.
+- When cassandra3 recovers, does the older write W1 (v2) on cassandra3 ever overwrite
+  or supersede the newer write W2 (v3) on cassandra1/cassandra2?
+
+
+4. CONFIGURATION MATRIX
+-----------------------
+Monotonic Writes is primarily a write-ordering property.
+The three write consistency levels are evaluated:
+  - WRITE ONE
+  - WRITE QUORUM
+  - WRITE ALL
+
+Total planned trials: 180 trials (60 trials per write CL).
+
+
+5. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+Phase 1: Pre-trial Health Verification
+  - Query nodetool status: verify all 3 nodes report 'UN'.
+  - Query nodetool describecluster: verify Live=3, Unreachable=0, schema agreed.
+  - Verify native CQL ports (9042, 9043, 9044) are open.
+
+Phase 2: Baseline State Establishment (v1)
+  - Write initial version v1 with CL=ALL while all 3 nodes are healthy.
+  - Setup coordinator is selected strictly from surviving majority nodes
+    (cassandra1, cassandra2) and re-randomized inside the retry loop.
+    This prevents coupling pre-trial setup to transient socket recovery of cassandra3.
+
+Phase 3: Write 1 (v2)
+  - Client writes v2 at tested write_cl across the healthy 3-node cluster.
+  - Write coordinator is selected from all 3 healthy nodes (cassandra1, cassandra2, cassandra3).
+
+Phase 4: Node Failure Injection
+  - Stop container cassandra3 ('docker stop -t 2 cassandra3').
+  - Verify container is stopped ('docker inspect').
+
+Phase 5: Degraded Client Write 2 (v3)
+  - The same client issues Write 2 (v3) at tested write_cl with timestamp T2 > T1.
+  - Write coordinator is selected from surviving nodes (cassandra1, cassandra2).
+  - If write_cl == ALL: Cassandra cannot satisfy ALL (requires 3, only 2 alive).
+    This raises an exception (WriteTimeout or UnavailableException) and is
+    classified as OPERATION_FAILURE (UNAVAILABLE_ALL / WRITE_TIMEOUT), NOT an MW violation.
+
+Phase 6: Node Recovery and Cluster Healing (finally block)
+  - Restart container cassandra3 ('docker start cassandra3').
+  - Poll until all 3 nodes report 'UN', ports open, Live=3, Unreachable=0,
+    and schema agreement is restored.
+
+Phase 7: Post-Recovery Reconciliation Probe
+  - Issue read at CL=QUORUM across healed cluster to record reconciled state.
+
+Phase 8: Trial Logging
+  - Record complete trial parameters, coordinators, write timestamps,
+    reconciled version, classification, and failure mechanism into node_failure.csv.
+
+
+6. CLASSIFICATION TAXONOMY
+--------------------------
+1. PASS:
+   w1 and w2 completed successfully, and reconciled_version == 3.
+   The database preserved the client's sequential write order (v3 superseded v2).
+
+2. MW_VIOLATION:
+   w1 and w2 completed successfully, but reconciled_version < 3 (e.g. reconciled_version == 2).
+   The earlier write superseded or overwrote the later write.
+
+3. OPERATION_FAILURE:
+   An operation could not complete due to availability constraints:
+   - WRITE_TIMEOUT / UNAVAILABLE_ALL on CL=ALL write while 1 node is stopped.
+   Failed operations are NEVER classified as MW violations.
+
+4. SETUP_ERROR:
+   Pre-trial baseline write (CL=ALL) failed after retries prior to injection.
+
+
+7. OUTPUT ARTIFACTS
+-------------------
+- monotonic_writes/results/node_failure.csv (raw trial observations)
+- monotonic_writes/results/node_failure_summary.csv (aggregated metrics)

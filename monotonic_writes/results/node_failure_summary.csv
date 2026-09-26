@@ -1,0 +1,4 @@
+write_cl,trials,passes,violations,operation_failures,setup_errors,availability,mw_success_rate,unavailable_all_failures,unavailable_quorum_failures,timeout_failures,other_failures
+ONE,20,20,0,0,0,1.0,1.0,0,0,0,0
+QUORUM,20,20,0,0,0,1.0,1.0,0,0,0,0
+ALL,20,0,0,20,0,0.0,0.0,20,0,0,0
