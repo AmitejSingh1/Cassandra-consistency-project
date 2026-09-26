@@ -1,0 +1,10 @@
+w1_cl,read_cl,w2_cl,total_trials,fresh_reads,stale_reads,lineage_preserved,lineage_not_observed,stale_read_lost_updates,stale_read_branch_converged,operation_failures,unavailable_all_failures,setup_errors
+ONE,ONE,QUORUM,20,20,0,20,0,0,0,0,0,0
+ONE,QUORUM,QUORUM,20,20,0,20,0,0,0,0,0,0
+ONE,ALL,QUORUM,20,0,0,0,0,0,0,20,20,0
+QUORUM,ONE,QUORUM,20,20,0,20,0,0,0,0,0,0
+QUORUM,QUORUM,QUORUM,20,20,0,20,0,0,0,0,0,0
+QUORUM,ALL,QUORUM,20,0,0,0,0,0,0,20,20,0
+ALL,ONE,QUORUM,20,0,0,0,0,0,0,20,20,0
+ALL,QUORUM,QUORUM,20,0,0,0,0,0,0,20,20,0
+ALL,ALL,QUORUM,20,0,0,0,0,0,0,20,20,0
