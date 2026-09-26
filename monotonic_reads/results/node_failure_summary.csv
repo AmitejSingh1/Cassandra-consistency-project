@@ -1,0 +1,10 @@
+write_cl,read_cl,trials,passes,violations,operation_failures,setup_errors,availability,mr_success_rate,different_coordinator_trials,unavailable_all_failures,unavailable_quorum_failures,timeout_failures,other_failures
+ONE,ONE,20,20,0,0,0,1.0,1.0,6,0,0,0,0
+ONE,QUORUM,20,20,0,0,0,1.0,1.0,10,0,0,0,0
+ONE,ALL,20,0,0,20,0,0.0,0.0,7,20,0,0,0
+QUORUM,ONE,20,20,0,0,0,1.0,1.0,13,0,0,0,0
+QUORUM,QUORUM,20,20,0,0,0,1.0,1.0,12,0,0,0,0
+QUORUM,ALL,20,0,0,20,0,0.0,0.0,10,20,0,0,0
+ALL,ONE,20,20,0,0,0,1.0,1.0,10,0,0,0,0
+ALL,QUORUM,20,20,0,0,0,1.0,1.0,9,0,0,0,0
+ALL,ALL,20,0,0,20,0,0.0,0.0,8,20,0,0,0

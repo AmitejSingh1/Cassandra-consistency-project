@@ -806,3 +806,119 @@ Similarly:
 means that no violation was observed in those trials. Experimental
 observation should not automatically be interpreted as a universal
 theoretical guarantee.
+
+
+================================================================================
+MONOTONIC READS (MR) CONSISTENCY – NODE FAILURE EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Monotonic-Read (MR) consistency when a single replica crashes after a write
+has completed.
+
+Monotonic Reads requires that if a logical client observes version v_a at logical
+time t1, any subsequent read by the same logical client on that key at logical
+time t2 > t1 must never observe an older version v_b < v_a.
+
+Under single-node crash-stop failure (RF=3):
+- Replicas: cassandra1, cassandra2, cassandra3.
+- Target failed node: cassandra3 is stopped during the degraded read phase.
+- Surviving nodes: cassandra1, cassandra2 remain online and handle the two sequential reads.
+
+
+2. CORE MONOTONICITY CHECK
+--------------------------
+A single client performs two sequential reads (Read 1 and Read 2):
+- Read 2 is executed ONLY after Read 1 has successfully completed.
+- Core check:
+      first_read_version <= second_read_version
+
+Outcomes:
+- v1 -> v1 : PASS (stale read, but non-decreasing: version did not regress)
+- v1 -> v2 : PASS (monotonic version progression)
+- v2 -> v2 : PASS (fresh read consistently maintained)
+- v2 -> v1 : MR_VIOLATION (regression where reader observed newer then older version)
+
+
+3. CONFIGURATION MATRIX
+-----------------------
+All 9 combinations of Write CL x Read CL are evaluated:
+  - WRITE ONE     / READ ONE
+  - WRITE ONE     / READ QUORUM
+  - WRITE ONE     / READ ALL
+  - WRITE QUORUM  / READ ONE
+  - WRITE QUORUM  / READ QUORUM
+  - WRITE QUORUM  / READ ALL
+  - WRITE ALL     / READ ONE
+  - WRITE ALL     / READ QUORUM
+  - WRITE ALL     / READ ALL
+
+
+4. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+Phase 1: Pre-trial Health Verification
+  - Query nodetool status: verify all 3 nodes report 'UN'.
+  - Query nodetool describecluster: verify Live=3, Unreachable=0, schema agreed.
+  - Verify native CQL ports (9042, 9043, 9044) are open.
+
+Phase 2: Baseline State Establishment (v1)
+  - Write initial version v1 with CL=ALL while all 3 nodes are healthy.
+  - Setup coordinator is selected strictly from surviving majority nodes
+    (cassandra1, cassandra2) and re-randomized inside the retry loop.
+    This prevents coupling pre-trial setup to transient socket recovery of cassandra3.
+
+Phase 3: Writer Write (v2)
+  - Writer writes v2 at tested write_cl across the healthy 3-node cluster.
+  - Write coordinator is selected from all 3 healthy nodes (cassandra1, cassandra2, cassandra3).
+
+Phase 4: Node Failure Injection
+  - Gracefully close client session to cassandra3.
+  - Stop container cassandra3 ('docker stop -t 2 cassandra3').
+  - Verify container is stopped ('docker inspect').
+
+Phase 5: Two Degraded Sequential Reads (Read 1 & Read 2)
+  - The client issues Read 1 at read_cl via an independently chosen surviving coordinator
+    (cassandra1 or cassandra2).
+  - Only after Read 1 completes, the client issues Read 2 at read_cl via an independently
+    chosen surviving coordinator.
+  - If read_cl == ALL: Cassandra cannot satisfy ALL (requires 3, only 2 alive).
+    This raises an exception (e.g. UnavailableException or ReadTimeout) and is
+    classified as OPERATION_FAILURE (UNAVAILABLE_ALL / READ_TIMEOUT), NOT an MR violation.
+
+Phase 6: Node Recovery and Cluster Healing (finally block)
+  - Restart container cassandra3 ('docker start cassandra3').
+  - Poll until all 3 nodes report 'UN', ports open, Live=3, Unreachable=0,
+    and schema agreement is restored.
+
+Phase 7: Post-Recovery Reconciliation Probe
+  - Issue read at CL=QUORUM across healed cluster to record reconciled state.
+
+Phase 8: Trial Logging
+  - Record complete trial parameters, coordinators, read 1/2 versions,
+    regression flag, classification, and failure mechanism into node_failure.csv.
+
+
+5. CLASSIFICATION TAXONOMY
+--------------------------
+1. PASS:
+   first_read_version <= second_read_version (non-decreasing sequence).
+
+2. MR_VIOLATION:
+   first_read_version == 2 and second_read_version == 1 (regression).
+
+3. OPERATION_FAILURE:
+   Operation could not complete due to availability constraints:
+   - UNAVAILABLE_ALL / READ_TIMEOUT on CL=ALL reads while 1 node is stopped.
+   - WRITE_TIMEOUT on write operations.
+   Failed operations are NEVER classified as MR violations.
+
+4. SETUP_ERROR:
+   Pre-trial baseline write (CL=ALL) failed after retries prior to injection.
+
+
+6. OUTPUT ARTIFACTS
+-------------------
+- monotonic_reads/results/node_failure.csv (raw trial observations)
+- monotonic_reads/results/node_failure_summary.csv (aggregated metrics)
