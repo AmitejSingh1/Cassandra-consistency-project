@@ -802,3 +802,207 @@ Phase 8: Trial Logging
 -------------------
 - monotonic_writes/results/node_failure.csv (raw trial observations)
 - monotonic_writes/results/node_failure_summary.csv (aggregated metrics)
+
+
+================================================================================
+MONOTONIC WRITES (MW) CONSISTENCY – NETWORK PARTITION EXPERIMENT DESIGN
+================================================================================
+
+1. OBJECTIVE
+------------
+The purpose of this experiment is to evaluate whether Apache Cassandra preserves
+Monotonic-Write (MW) consistency for sequential writes issued by the same logical
+client across a symmetric network partition between cluster components.
+
+Monotonic Writes requires that if a logical client issues write W1 (e.g. v2) and
+subsequently issues write W2 (e.g. v3), the database must apply W1 before W2,
+and the earlier write W1 must never supersede or overwrite the later write W2.
+
+
+2. PARTITION TOPOLOGY AND COMPONENT ROLES
+-----------------------------------------
+The 3-node cluster (RF=3) is divided into:
+- Majority Component (M): cassandra1 (172.18.0.3), cassandra2 (172.18.0.4)
+- Minority Component (I): cassandra3 (172.18.0.2)
+
+Partition injection utilizes Linux kernel blackhole routing tables on all three
+containers:
+- cassandra1: ip route replace blackhole 172.18.0.2
+- cassandra2: ip route replace blackhole 172.18.0.2
+- cassandra3: ip route replace blackhole 172.18.0.3
+- cassandra3: ip route replace blackhole 172.18.0.4
+
+This drops internode packets between {c1, c2} and {c3} with zero TCP RST or ICMP
+unreachable signals.
+The link between cassandra1 and cassandra2 remains intact with normal latency.
+
+
+3. SEQUENTIAL WRITE TRAJECTORIES UNDER PARTITION
+------------------------------------------------
+Because Monotonic Writes is purely a write-ordering property, there are no
+intermediate reads by other clients.
+The client performs two sequential writes:
+- Write 1 (W1): version = 2, timestamp T1 = base + 1000 microseconds
+- Write 2 (W2): version = 3, timestamp T2 = base + 2000 microseconds (> T1)
+
+Under partition, client writes can follow four distinct component trajectories:
+1. Intra-Majority (M -> M):
+   Both W1 and W2 are coordinated by nodes in the majority component.
+2. Cross-Partition Forward (M -> I):
+   The client writes W1 to Majority M, then switches to Minority I and writes W2.
+   Under partition, M holds older write W1 (v2), while I holds newer write W2 (v3).
+3. Cross-Partition Reverse (I -> M):
+   The client writes W1 to Minority I, then switches to Majority M and writes W2.
+   Under partition, I holds older write W1 (v2), while M holds newer write W2 (v3).
+4. Intra-Minority (I -> I):
+   Both writes are coordinated by the isolated minority node cassandra3.
+
+
+4. EXPERIMENTAL PATH DEFINITIONS (P1–P7)
+----------------------------------------
+To evaluate write consistency and availability boundaries without inflating
+the benchmark with redundant read paths:
+
+Path P1: Intra-Majority Quorum Writes
+  - Routing: M -> M (W1=QUORUM, W2=QUORUM)
+  - Expected: PASS (quorum writes acknowledged across {c1, c2})
+
+Path P2: Intra-Majority Local Writes
+  - Routing: M -> M (W1=ONE, W2=ONE)
+  - Expected: PASS (local writes within majority component)
+
+Path P3: Cross-Partition Forward Traversal
+  - Routing: M -> I (W1=ONE, W2=ONE)
+  - Tests split state: M holds v2, isolated I holds v3.
+  - Expected: PASS (upon healing, LWW timestamp resolver preserves v3 over v2)
+
+Path P4: Cross-Partition Reverse Traversal
+  - Routing: I -> M (W1=ONE, W2=ONE)
+  - Tests split state: isolated I holds v2, M holds v3.
+  - Expected: PASS (upon healing, resurrected v2 never overwrites newer v3)
+
+Path P5: Intra-Minority Local Writes
+  - Routing: I -> I (W1=ONE, W2=ONE)
+  - Tests writes confined to isolated minority node cassandra3.
+  - Expected: PASS (v3 preserved locally and propagates upon healing)
+
+Path P6: Majority Write Availability Boundary
+  - Routing: M -> M (W1=ALL, W2=ONE)
+  - W1 attempted at CL=ALL on M; requires 3 replicas, only 2 reachable.
+  - Expected: OPERATION_FAILURE (WRITE_TIMEOUT)
+
+Path P7: Minority Write Availability Boundary
+  - Routing: I -> I (W1=QUORUM, W2=ONE)
+  - W1 attempted at CL=QUORUM on I; requires 2 replicas, only 1 reachable.
+  - Expected: OPERATION_FAILURE (WRITE_TIMEOUT / UNAVAILABLE_QUORUM)
+
+
+5. PER-TRIAL EXECUTION LIFECYCLE
+--------------------------------
+Phase 1: Pre-trial Health Verification
+  - Query nodetool status: verify all 3 nodes report 'UN'.
+  - Query nodetool describecluster: verify Live=3, Unreachable=0, schema agreed.
+  - Verify native CQL ports (9042, 9043, 9044) are open.
+
+Phase 2: Baseline State Establishment (v1)
+  - Write initial version v1 with CL=ALL while all 3 nodes are healthy.
+  - Setup coordinator is selected strictly from majority nodes (cassandra1, cassandra2)
+    and re-randomized inside the retry loop.
+
+Phase 3: Inject Symmetric Network Partition
+  - Install blackhole routes on cassandra1, cassandra2, and cassandra3.
+  - Sleep 1.0s for route table convergence.
+
+Phase 4: Client Write 1 (v2)
+  - Issued to assigned w1_component at w1_cl with timestamp T1.
+  - If W1 fails, record OPERATION_FAILURE and skip W2.
+
+Phase 5: Client Write 2 (v3)
+  - Issued by the same client to assigned w2_component at w2_cl with timestamp T2 > T1.
+  - Executed ONLY if W1 completed successfully.
+  - If W2 fails, record OPERATION_FAILURE.
+
+Phase 6: Partition Healing & Health Recovery (finally block)
+  - Remove blackholes on all nodes ('ip route del blackhole').
+  - Poll until all 3 nodes report UN, Live=3, Unreachable=0, and schema agreed.
+
+Phase 7: Post-Recovery Reconciliation Probe
+  - Issue read query at CL=QUORUM across healed cluster to record reconciled state.
+
+Phase 8: Trial Logging
+  - Record complete trial parameters, coordinators, write timestamps,
+    reconciled version, classification, and failure mechanism into network_partition.csv.
+
+
+6. CLASSIFICATION TAXONOMY
+--------------------------
+1. PASS:
+   w1 and w2 completed successfully, and reconciled_version == 3.
+   The database preserved the client's sequential write order (v3 superseded v2).
+
+2. MW_VIOLATION:
+   w1 and w2 completed successfully, but reconciled_version < 3 (e.g. reconciled_version == 2).
+   The earlier write superseded or overwrote the later write.
+
+3. OPERATION_FAILURE:
+   An operation could not complete due to partition constraints:
+   - WRITE_TIMEOUT on CL=ALL write on M in P6.
+   - WRITE_TIMEOUT / UNAVAILABLE_QUORUM on CL=QUORUM write on I in P7.
+   Failed operations are NEVER classified as MW violations.
+
+4. SETUP_ERROR:
+   Pre-trial baseline write (CL=ALL) failed after retries prior to injection.
+
+
+7. SAMPLE SIZE & PLANNED TRIALS
+-------------------------------
+Following the project's standard per-configuration sample size of N = 20 trials:
+- 7 paths (P1–P7) x 20 trials = 140 trials.
+(Alternatively, if restricted to 3 write consistency levels as in node failure: 3 x 20 = 60 trials).
+
+
+8. OUTPUT ARTIFACTS
+-------------------
+- monotonic_writes/results/network_partition.csv (raw trial observations)
+- monotonic_writes/results/network_partition_summary.csv (aggregated metrics)
+
+
+9. EXPERIMENTAL RESULTS (140 TRIALS)
+------------------------------------
+Total trials executed: 140
+Paths: P1–P7 (20 trials each)
+Total unique keys: 140 / 140
+
+PATH SUMMARY:
+- P1 (M -> M, W1=QUORUM, W2=QUORUM): 20/20 PASS (100% availability, 100% MW success)
+- P2 (M -> M, W1=ONE, W2=ONE):       20/20 PASS (100% availability, 100% MW success)
+- P3 (M -> I, W1=ONE, W2=ONE):       20/20 PASS (100% availability, 100% MW success)
+- P4 (I -> M, W1=ONE, W2=ONE):       20/20 PASS (100% availability, 100% MW success)
+- P5 (I -> I, W1=ONE, W2=ONE):       20/20 PASS (100% availability, 100% MW success)
+- P6 (M -> M, W1=ALL, W2=ONE):       20/20 OPERATION_FAILURE (0% availability; 100% WRITE_TIMEOUT on W1)
+- P7 (I -> I, W1=QUORUM, W2=ONE):    20/20 OPERATION_FAILURE (0% availability; 100% WRITE_TIMEOUT on W1)
+
+AGGREGATE METRICS:
+- PASS: 100 / 140 (71.4%)
+- MW_VIOLATION: 0 / 140 (0.0%)
+- OPERATION_FAILURE: 40 / 140 (28.6%)
+- SETUP_ERROR: 0 / 140 (0.0%)
+- Monotonic Writes Success Rate: 100/100 (100.0% among completed trials)
+
+EMPIRICAL FINDINGS & ANALYSIS:
+1. Write-Order Preservation across Trajectories:
+   Across all completed trials (paths P1 through P5), Cassandra preserved Monotonic Writes
+   ordering with 100% consistency. Even under cross-partition traversals (P3 and P4) where
+   the older write W1 and newer write W2 landed on physically disconnected components,
+   post-healing cluster reconciliation via Last-Write-Wins (LWW) cell timestamps
+   guaranteed that v3 superseded v2 in every trial. Older mutations on the isolated minority
+   node never superseded newer mutations upon re-integration.
+2. Availability Boundaries:
+   Paths P6 (CL=ALL on M) and P7 (CL=QUORUM on I) consistently and deterministically failed
+   at W1 with WRITE_TIMEOUT because the required replica counts could not be satisfied under
+   the partition. Crucially, these failed operations were properly classified as OPERATION_FAILURE
+   rather than consistency violations.
+3. Resilience & Elimination of Setup Errors:
+   The adaptive backoff retry mechanism (1.5 * attempts) and 5.0s stabilization sleep
+   completely eliminated transient internode socket reconnections, yielding 0 setup errors
+   across all 140 trials.

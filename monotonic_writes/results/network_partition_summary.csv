@@ -1,0 +1,8 @@
+path,description,w1_component,w2_component,w1_cl,w2_cl,trials,passes,violations,operation_failures,setup_errors,availability,mw_success_rate,unavailable_all_failures,unavailable_quorum_failures,timeout_failures,other_failures
+P1,"Intra-majority quorum writes (M -> M, W1=QUORUM, W2=QUORUM)",M,M,QUORUM,QUORUM,20,20,0,0,0,1.0,1.0,0,0,0,0
+P2,"Intra-majority local writes (M -> M, W1=ONE, W2=ONE)",M,M,ONE,ONE,20,20,0,0,0,1.0,1.0,0,0,0,0
+P3,"Cross-partition forward traversal (M -> I, W1=ONE, W2=ONE)",M,I,ONE,ONE,20,20,0,0,0,1.0,1.0,0,0,0,0
+P4,"Cross-partition reverse traversal (I -> M, W1=ONE, W2=ONE)",I,M,ONE,ONE,20,20,0,0,0,1.0,1.0,0,0,0,0
+P5,"Intra-minority local writes (I -> I, W1=ONE, W2=ONE)",I,I,ONE,ONE,20,20,0,0,0,1.0,1.0,0,0,0,0
+P6,"Majority write availability boundary (M -> M, W1=ALL, W2=ONE)",M,M,ALL,ONE,20,0,0,20,0,0.0,0.0,0,0,20,0
+P7,"Minority write availability boundary (I -> I, W1=QUORUM, W2=ONE)",I,I,QUORUM,ONE,20,0,0,20,0,0.0,0.0,0,0,20,0
